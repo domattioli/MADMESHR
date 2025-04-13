@@ -6,3 +6,10 @@ Publications to inform codebase:
 ```bash
 git submodule add https://github.com/OSUdomattioli/CHILmesh.git external/CHILmesh
 ````
+
+## Example Usage
+```python
+import sys
+sys.path.append("external/CHILmesh")
+from CHILmesh import CHILmesh  # or whatever the module exposes
+```
