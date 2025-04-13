@@ -1,38 +1,37 @@
-import numpy as np
-from sac_agent import SAC
-from replay_buffer import ReplayBuffer
-from mesh_env import MeshEnvironment
-from trainer import SACTrainer
+# main.py
+from src.agents.sac import SAC
+from src.trainers.sac_trainer import SACTrainer
+from src.envs.mesh_environment import MeshEnvironment
+from src.utils.replay_buffer import ReplayBuffer
+from src.visualization.plot_utils import plot_training_results, visualize_mesh_generation
 
 def main():
-    # --- Initialize Environment ---
+    # --- Environment Setup ---
     env = MeshEnvironment()
+    env.plot_domain()
     print(f"Observation space: {env.observation_space.shape}")
     print(f"Action space: {env.action_space.shape}")
-    env.plot_domain()  # Optional: visualize mesh
 
-    # --- Initialize Agent ---
+    # --- Agent and Trainer Setup ---
     agent = SAC(
         state_dim=env.observation_space.shape[0],
         action_dim=env.action_space.shape[0],
         hidden_dim=128
     )
+    buffer = ReplayBuffer(capacity=100_000)
+    trainer = SACTrainer(agent, env, buffer)
 
-    # --- Initialize Replay Buffer ---
-    replay_buffer = ReplayBuffer(capacity=100_000)
-
-    # --- Train with SACTrainer ---
-    trainer = SACTrainer(env, agent, replay_buffer)
+    # --- Train the Agent ---
     results = trainer.train(
         total_timesteps=50_000,
         batch_size=256,
-        initial_random_steps=10_000,
-        eval_interval=5_000,
-        max_ep_len=100
+        initial_random_steps=1_000,
+        eval_interval=5_000
     )
 
-    # Optionally, save results
-    np.savez("training_results.npz", **results)
+    # --- Visualize Results ---
+    plot_training_results(results)
+    visualize_mesh_generation(env, agent, max_steps=100)
 
 if __name__ == "__main__":
     main()
