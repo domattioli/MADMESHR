@@ -11,6 +11,27 @@ import random
 import os
 from typing import List, Tuple, Dict, Optional, Union, Any
 
+
+__all__ = ['ReplayBuffer', 'SAC']
+
+
+class ReplayBuffer:
+    """Experience replay buffer for SAC."""
+    
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
+    
+    def add(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+    
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, batch_size)
+        states, actions, rewards, next_states, dones = map(np.array, zip(*batch))
+        return states, actions, rewards, next_states, dones
+    
+    def size(self):
+        return len(self.buffer)
+
 class SAC:
     def __init__(self, state_dim, action_dim, hidden_dim=128, gamma=0.99, tau=0.005):
         # Parameters
