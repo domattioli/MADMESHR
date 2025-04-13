@@ -1,5 +1,5 @@
 <h1 align="center">
-  MeADMESHR: Mixed-element ADvanced MESH generator with Reinforcement-learning for 2D hydrodynamic domains.
+  MADMESHR: Mixed-element ADvanced MESH generator with Reinforcement-learning for 2D hydrodynamic domains.
 </h1>
 
 <p align="center">
@@ -19,7 +19,7 @@
   <a href="https://github.com/user-attachments/files/19724263/QuADMESH-Thesis.pdf">
     <img src="https://img.shields.io/badge/Thesis-QuADMESH-ba0c2f?style=flat-square&logo=book&logoColor=white&labelColor=cfd4d8" alt="QuADMESH Thesis">
   </a>
-  <a href="https://github.com/domattioli/QuADMESHRL/blob/4cdc85418f2d357f28634365edde7a7f43ac99eb/LICENSE">
+  <a href="https://github.com/domattioli/MADMESHR/blob/4cdc85418f2d357f28634365edde7a7f43ac99eb/LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License: MIT">
   </a>
 </p>
