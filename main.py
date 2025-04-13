@@ -1,9 +1,8 @@
 # main.py
-from src.agents.sac import SAC
-from src.trainers.sac_trainer import SACTrainer
-from src.envs.mesh_environment import MeshEnvironment
-from src.utils.replay_buffer import ReplayBuffer
-from src.visualization.plot_utils import plot_training_results, visualize_mesh_generation
+from src.SAC import *
+from src.trainer import *
+from src.MeshEnvironment import *
+from src.utilsvisualization.visualization import *
 
 def main():
     # --- Environment Setup ---
