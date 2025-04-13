@@ -4,8 +4,8 @@ from typing import Optional, Dict
 from tqdm import trange
 import matplotlib.pyplot as plt
 
-from SAC import *             
-from MeshEnvironment import * 
+from src.SAC import *             
+from src.MeshEnvironment import * 
 
 __all__ = ['SACTrainer']
 
