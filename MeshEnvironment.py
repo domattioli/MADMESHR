@@ -11,6 +11,8 @@ import random
 import os
 from typing import List, Tuple, Dict, Optional, Union, Any
 
+__all__ = ['MeshEnvironment']
+
 class MeshEnvironment(gym.Env):
     def __init__(self, initial_boundary=None, interior_points=None):
         # Initialize domain boundary
