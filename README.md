@@ -1,5 +1,5 @@
 <h1 align="center">
-  MADMESHR: Mixed-element ADvanced MESH generator with Reinforcement-learning for 2D hydrodynamic domains.
+  MADMESHR: Mixed-element ADvanced MESH generator with Reinforcement-learning for 2D unstructured hydrodynamic domains.
 </h1>
 
 <p align="center">
