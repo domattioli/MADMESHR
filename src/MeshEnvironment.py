@@ -35,7 +35,7 @@ class MeshEnvironment(gym.Env):
         # Parameters
         self.n_rv = 2
         self.g = 3
-        self.beta = 6
+        self.beta = 2.5
         
         # Create initial state
         temp_state = self._get_state_initial()
@@ -139,7 +139,7 @@ class MeshEnvironment(gym.Env):
         reference_vertex = self._select_reference_vertex()
         ref_idx = -1
         for i, v in enumerate(self.boundary):
-            if np.array_equal(v, reference_vertex):
+            if np.allclose(v, reference_vertex, atol=1e-10):
                 ref_idx = i
                 break
         
@@ -157,37 +157,39 @@ class MeshEnvironment(gym.Env):
         
         # Calculate fan-shaped area points
         radius = self._calculate_fan_shape_radius(reference_vertex)
+        if radius < 1e-10:
+            radius = 1.0  # fallback to avoid division by zero
         fan_points = self._get_fan_shape_points(reference_vertex, radius)
-        
+
         # Calculate remaining area ratio
         remaining_area = self._calculate_polygon_area(self.boundary)
-        area_ratio = remaining_area / self.original_area
-        
+        area_ratio = remaining_area / max(1e-10, self.original_area)
+
         # Build state vector
         state_components = []
-        
+
         # Process surrounding vertices
         for vertex in surrounding_vertices:
             rel_vector = vertex - reference_vertex
             distance = np.linalg.norm(rel_vector)
             angle = np.arctan2(rel_vector[1], rel_vector[0])
-            
+
             # Normalize and add to state
             norm_distance = distance / radius
             norm_angle = angle / np.pi
-            
+
             state_components.extend([norm_distance, norm_angle, 0])
-        
+
         # Process fan-shaped area points
         for point in fan_points:
             rel_vector = point - reference_vertex
             distance = np.linalg.norm(rel_vector)
             angle = np.arctan2(rel_vector[1], rel_vector[0])
-            
+
             # Normalize and add to state
             norm_distance = distance / radius
             norm_angle = angle / np.pi
-            
+
             state_components.extend([norm_distance, norm_angle, 1])
         
         # Add area ratio
@@ -331,7 +333,7 @@ class MeshEnvironment(gym.Env):
         
         ref_idx = -1
         for i, v in enumerate(self.boundary):
-            if np.array_equal(v, reference_vertex):
+            if np.allclose(v, reference_vertex, atol=1e-10):
                 ref_idx = i
                 break
         
@@ -358,7 +360,7 @@ class MeshEnvironment(gym.Env):
         # Find reference vertex in boundary
         left_idx, right_idx = -1, -1
         for i, v in enumerate(self.boundary):
-            if np.array_equal(v, reference_vertex):
+            if np.allclose(v, reference_vertex, atol=1e-10):
                 left_idx = (i - 1) % len(self.boundary)
                 right_idx = (i + 1) % len(self.boundary)
                 break
@@ -370,16 +372,26 @@ class MeshEnvironment(gym.Env):
             return fan_points
         
         # Calculate angle between left and right vertices
+        # Use cross product to determine which arc is the interior (unmeshed) side
         left_v = self.boundary[left_idx] - reference_vertex
         right_v = self.boundary[right_idx] - reference_vertex
-        
+
         left_angle = np.arctan2(left_v[1], left_v[0])
         right_angle = np.arctan2(right_v[1], right_v[0])
-        
-        # Ensure right angle is ahead of left angle
-        if right_angle < left_angle:
-            right_angle += 2 * np.pi
-            
+
+        # Cross product: left_v x right_v. If positive (CCW boundary), the interior
+        # is the arc from right_angle to left_angle going CCW.
+        cross = left_v[0] * right_v[1] - left_v[1] * right_v[0]
+
+        if cross > 0:
+            # CCW boundary: interior sweeps from right_angle to left_angle (CCW)
+            if left_angle < right_angle:
+                left_angle += 2 * np.pi
+        else:
+            # CW boundary: interior sweeps from left_angle to right_angle
+            if right_angle < left_angle:
+                right_angle += 2 * np.pi
+
         angles = np.linspace(left_angle, right_angle, self.g+2)[1:-1]
         
         for angle in angles:
@@ -415,7 +427,7 @@ class MeshEnvironment(gym.Env):
         """Form a quadrilateral element based on action type"""
         ref_idx = -1
         for i, v in enumerate(self.boundary):
-            if np.array_equal(v, reference_vertex):
+            if np.allclose(v, reference_vertex, atol=1e-10):
                 ref_idx = i
                 break
         
@@ -521,50 +533,98 @@ class MeshEnvironment(gym.Env):
         return False
     
     def _update_boundary(self, new_element):
-        """Update boundary after adding a new element"""
-        boundary_list = self.boundary.tolist()
-        element_points = new_element.tolist()
-        
-        # Create list of element edges
-        element_edges = []
-        for i in range(len(element_points)):
-            edge = [element_points[i], element_points[(i+1) % len(element_points)]]
-            edge.sort(key=lambda p: (p[0], p[1]))
-            element_edges.append(edge)
-        
-        # Find edges to remove
-        edges_to_remove = []
-        for i in range(len(boundary_list)):
-            edge = [boundary_list[i], boundary_list[(i+1) % len(boundary_list)]]
-            edge.sort(key=lambda p: (p[0], p[1]))
-            
-            if edge in element_edges:
-                edges_to_remove.append(i)
-        
-        edges_to_remove.sort(reverse=True)
-        
-        # Remove edges
-        for idx in edges_to_remove:
-            boundary_list.pop((idx + 1) % len(boundary_list))
-        
-        # Add new edges
-        for edge in element_edges:
-            edge_in_boundary = False
-            for i in range(len(boundary_list)):
-                b_edge = [boundary_list[i], boundary_list[(i+1) % len(boundary_list)]]
-                b_edge.sort(key=lambda p: (p[0], p[1]))
-                
-                if edge == b_edge:
-                    edge_in_boundary = True
+        """Update boundary after adding a new element using splice-based algorithm.
+
+        Identifies the contiguous boundary segment consumed by the element,
+        then replaces it with the element's non-boundary edges, preserving
+        winding order.
+        """
+        n = len(self.boundary)
+        if n == 0:
+            return
+
+        # 1. Find which boundary vertex indices are in the element
+        elem_boundary_indices = []
+        for i in range(n):
+            for ev in new_element:
+                if np.allclose(self.boundary[i], ev, atol=1e-10):
+                    elem_boundary_indices.append(i)
                     break
-            
-            if not edge_in_boundary:
-                for i in range(len(boundary_list)):
-                    if boundary_list[i] == edge[0] or boundary_list[i] == edge[1]:
-                        boundary_list.insert(i+1, edge[1] if boundary_list[i] == edge[0] else edge[0])
-                        break
-        
-        self.boundary = np.array(boundary_list)
+
+        if len(elem_boundary_indices) == 0:
+            return
+
+        idx_set = set(elem_boundary_indices)
+
+        # 2. Find start of the contiguous consumed segment:
+        #    a boundary index IN the element whose predecessor is NOT.
+        start = None
+        for idx in elem_boundary_indices:
+            if (idx - 1) % n not in idx_set:
+                start = idx
+                break
+
+        if start is None:
+            # All boundary vertices are in the element → fully consumed
+            self.boundary = np.array([]).reshape(0, 2)
+            return
+
+        # 3. Walk forward to get the full consumed segment in boundary order
+        consumed = []
+        current = start
+        while current in idx_set:
+            consumed.append(current)
+            idx_set.discard(current)
+            current = (current + 1) % n
+
+        # 4. Find the replacement vertices: the element path from consumed[-1]
+        #    back to consumed[0] that goes through NON-boundary element vertices.
+        elem_list = list(new_element)
+
+        last_consumed_coord = self.boundary[consumed[-1]]
+        first_consumed_coord = self.boundary[consumed[0]]
+
+        end_elem_idx = None
+        start_elem_idx = None
+        for i, ev in enumerate(elem_list):
+            if np.allclose(ev, last_consumed_coord, atol=1e-10):
+                end_elem_idx = i
+            if np.allclose(ev, first_consumed_coord, atol=1e-10):
+                start_elem_idx = i
+
+        if end_elem_idx is None or start_elem_idx is None:
+            return
+
+        # Walk element cycle from consumed[-1] to consumed[0] (the non-shared path)
+        replacement_verts = []
+        curr = (end_elem_idx + 1) % 4
+        while curr != start_elem_idx:
+            replacement_verts.append(elem_list[curr])
+            curr = (curr + 1) % 4
+
+        # 5. Build new boundary:
+        #    consumed[-1] → non-consumed boundary → consumed[0] → replacement → (back to consumed[-1])
+        new_boundary = []
+
+        # consumed[-1] stays (end of consumed segment)
+        new_boundary.append(self.boundary[consumed[-1]])
+
+        # Walk non-consumed boundary: consumed[-1]+1 → ... → consumed[0]-1
+        idx = (consumed[-1] + 1) % n
+        while idx != consumed[0]:
+            new_boundary.append(self.boundary[idx])
+            idx = (idx + 1) % n
+
+        # consumed[0] stays (start of consumed segment)
+        new_boundary.append(self.boundary[consumed[0]])
+
+        # Replacement vertices (non-boundary element path from consumed[0] → consumed[-1])
+        new_boundary.extend(replacement_verts)
+
+        if len(new_boundary) > 0:
+            self.boundary = np.array(new_boundary)
+        else:
+            self.boundary = np.array([]).reshape(0, 2)
     
     def _is_quadrilateral(self, polygon):
         """Check if polygon is a quadrilateral"""
@@ -640,7 +700,7 @@ class MeshEnvironment(gym.Env):
         # --- Type-1: grid over fan-shaped interior angle ---
         ref_idx = -1
         for i, v in enumerate(self.boundary):
-            if np.array_equal(v, ref_vertex):
+            if np.allclose(v, ref_vertex, atol=1e-10):
                 ref_idx = i
                 break
 
@@ -662,8 +722,14 @@ class MeshEnvironment(gym.Env):
         left_angle = np.arctan2(left_v[1], left_v[0])
         right_angle = np.arctan2(right_v[1], right_v[0])
 
-        if right_angle < left_angle:
-            right_angle += 2 * np.pi
+        # Use cross product to sweep the interior arc
+        cross = left_v[0] * right_v[1] - left_v[1] * right_v[0]
+        if cross > 0:
+            if left_angle < right_angle:
+                left_angle += 2 * np.pi
+        else:
+            if right_angle < left_angle:
+                right_angle += 2 * np.pi
 
         # Grid: n_angle angles x n_dist distances
         angle_bins = np.linspace(left_angle, right_angle, n_angle + 2)[1:-1]  # interior angles only
@@ -688,7 +754,7 @@ class MeshEnvironment(gym.Env):
         base_state = self._get_state()  # 22 floats
 
         # Boundary vertex count (normalized by initial count)
-        boundary_count = len(self.boundary) / len(self.initial_boundary)
+        boundary_count = len(self.boundary) / max(1, len(self.initial_boundary))
 
         # Elements placed (normalized — assume max ~50 elements)
         elements_placed = len(self.elements) / max(1, len(self.initial_boundary) * 4)
@@ -700,8 +766,15 @@ class MeshEnvironment(gym.Env):
         else:
             num_valid = 0.0
 
-        # Boundary shape: 8 evenly-spaced boundary samples as (x, y) = 16 floats
+        # Boundary shape: 8 evenly-spaced samples, RELATIVE to reference vertex
         boundary_samples = self._sample_boundary_points(8)
+        if len(self.boundary) >= 3:
+            ref = self._select_reference_vertex()
+            boundary_samples = boundary_samples - ref  # make reference-relative
+            # Normalize by fan radius for scale invariance
+            radius = self._calculate_fan_shape_radius(ref)
+            if radius > 1e-10:
+                boundary_samples = boundary_samples / radius
 
         # Action-type availability: 2 booleans
         if hasattr(self, '_cached_actions') and self._cached_actions is not None:

@@ -41,7 +41,7 @@ class DQN:
     Action masking: Q[invalid] = -inf after Q computation.
     """
 
-    def __init__(self, state_dim=44, num_actions=49, gamma=0.99, tau=0.005, lr=3e-4):
+    def __init__(self, state_dim=44, num_actions=49, gamma=0.95, tau=0.005, lr=3e-4):
         self.state_dim = state_dim
         self.num_actions = num_actions
         self.gamma = gamma
@@ -144,6 +144,7 @@ class DQN:
             loss = tf.reduce_mean((action_q - tf.stop_gradient(targets)) ** 2)
 
         gradients = tape.gradient(loss, self.online_net.trainable_variables)
+        gradients, _ = tf.clip_by_global_norm(gradients, 10.0)
         self.optimizer.apply_gradients(zip(gradients, self.online_net.trainable_variables))
 
         # Polyak update target network

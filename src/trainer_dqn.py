@@ -19,7 +19,7 @@ class DQNTrainer:
                  max_ep_len: int = 100,
                  epsilon_start: float = 1.0,
                  epsilon_end: float = 0.05,
-                 epsilon_decay_frac: float = 0.5):
+                 epsilon_decay_frac: float = 0.7):
         self.env = env
         self.agent = agent
         self.replay_buffer = replay_buffer
@@ -75,17 +75,20 @@ class DQNTrainer:
             next_state, reward, done, truncated, info = self.env.step(action)
             next_mask = info["action_mask"]
 
-            # Store transition (6-tuple)
-            self.replay_buffer.add(state, action, reward, next_state, next_mask, done or truncated)
-
             episode_return += reward
             episode_length += 1
+
+            # Mark terminal: either env signals done/truncated, or we hit max_ep_len
+            is_terminal = done or truncated or (episode_length >= self.max_ep_len)
+
+            # Store transition (6-tuple) — mark as done if terminal to prevent bootstrapping
+            self.replay_buffer.add(state, action, reward, next_state, next_mask, is_terminal)
 
             state = next_state
             mask = next_mask
 
             # Episode end
-            if done or truncated or episode_length >= self.max_ep_len:
+            if is_terminal:
                 episodes += 1
                 if done and info.get("complete", False):
                     completions += 1

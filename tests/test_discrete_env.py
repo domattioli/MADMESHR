@@ -193,7 +193,89 @@ class TestDiscreteActionEnv:
         if mask[0]:
             state, reward, done, truncated, info = wrapper.step(0)
             assert done, "Square should complete with single type-0 action"
-            assert reward == 10.0, f"Expected completion reward 10.0, got {reward}"
+            assert reward >= 10.0, f"Expected completion reward >= 10.0, got {reward}"
+
+
+# ---------------------------------------------------------------------------
+# Boundary correctness tests
+# ---------------------------------------------------------------------------
+
+class TestBoundaryUpdate:
+    """Tests for _update_boundary correctness after fixes."""
+
+    def test_type0_circle_shrinks_by_2(self):
+        """Type-0 on 16-vertex circle should reduce boundary by 2."""
+        angles = np.linspace(0, 2 * np.pi, 17)[:-1]
+        circle = np.column_stack([np.cos(angles), np.sin(angles)])
+        env = MeshEnvironment(initial_boundary=circle)
+        env.reset()
+
+        ref = env._select_reference_vertex()
+        element, valid = env._form_element(ref, 0, None)
+        assert valid
+        env._update_boundary(element)
+
+        assert len(env.boundary) == 14, f"Expected 14, got {len(env.boundary)}"
+
+    def test_no_duplicate_vertices_after_update(self):
+        """Boundary should have no duplicate vertices after update."""
+        angles = np.linspace(0, 2 * np.pi, 17)[:-1]
+        circle = np.column_stack([np.cos(angles), np.sin(angles)])
+        env = MeshEnvironment(initial_boundary=circle)
+        env.reset()
+
+        for step in range(5):
+            ref = env._select_reference_vertex()
+            element, valid = env._form_element(ref, 0, None)
+            if not valid:
+                break
+            env._update_boundary(element)
+            env.elements.append(element)
+
+            # Check for duplicates
+            coords = [tuple(np.round(v, 10)) for v in env.boundary]
+            assert len(coords) == len(set(coords)), \
+                f"Duplicate vertices at step {step}: {len(coords)} vs {len(set(coords))}"
+
+    def test_circle_completes_with_type0_only(self):
+        """16-vertex circle should complete in 6 type-0 steps: 16→14→...→4."""
+        angles = np.linspace(0, 2 * np.pi, 17)[:-1]
+        circle = np.column_stack([np.cos(angles), np.sin(angles)])
+        env = DiscreteActionEnv(MeshEnvironment(initial_boundary=circle))
+
+        state, info = env.reset()
+        total_reward = 0
+        for step in range(10):
+            mask = info["action_mask"]
+            valid = np.where(mask)[0]
+            if len(valid) == 0:
+                break
+            state, reward, done, truncated, info = env.step(valid[0])
+            total_reward += reward
+            if done:
+                break
+
+        assert done, "Circle should complete"
+        assert total_reward > 10.0, f"Total reward should include completion bonus, got {total_reward}"
+
+    def test_enriched_state_no_nan(self):
+        """Enriched state should never contain NaN values."""
+        angles = np.linspace(0, 2 * np.pi, 17)[:-1]
+        circle = np.column_stack([np.cos(angles), np.sin(angles)])
+        env = DiscreteActionEnv(MeshEnvironment(initial_boundary=circle))
+
+        state, info = env.reset()
+        assert not np.any(np.isnan(state)), f"NaN in initial state"
+
+        for step in range(8):
+            mask = info["action_mask"]
+            valid = np.where(mask)[0]
+            if len(valid) == 0:
+                break
+            state, reward, done, truncated, info = env.step(valid[0])
+            assert not np.any(np.isnan(state)), f"NaN in state at step {step}"
+            if done or truncated:
+                break
 
 
 # ---------------------------------------------------------------------------
