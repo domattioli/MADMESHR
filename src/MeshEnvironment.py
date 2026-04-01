@@ -50,6 +50,9 @@ class MeshEnvironment(gym.Env):
             low=-2, high=2, shape=(state_size,), dtype=np.float32
         )
         
+        # Action cache
+        self._cached_actions = None
+
         # Reset the environment
         self.reset()
     
@@ -58,10 +61,13 @@ class MeshEnvironment(gym.Env):
         self.boundary = self.initial_boundary.copy()
         self.elements = []
         self.element_qualities = []
+        self._invalidate_action_cache()
         state = self._get_state()
         return state, {}
     
     def step(self, action):
+        self._invalidate_action_cache()
+
         # Convert normalized action to actual values
         action_type = int((action[0] + 1) * 1.5)  # Map [-1,1] to [0,3)
         action_type = min(2, max(0, action_type))  # Clip to [0,2]
@@ -469,20 +475,23 @@ class MeshEnvironment(gym.Env):
         return self._is_convex_quad(quad)
     
     def _is_convex_quad(self, quad):
-        """Check if quadrilateral is convex"""
+        """Check if quadrilateral is convex (accepts either consistent winding)."""
+        crosses = []
         for i in range(4):
             prev = (i - 1) % 4
             curr = i
             next = (i + 1) % 4
-            
+
             v1 = quad[prev] - quad[curr]
             v2 = quad[next] - quad[curr]
-            
+
             cross_z = v1[0] * v2[1] - v1[1] * v2[0]
-            if cross_z <= 0:
-                return False
-                
-        return True
+            crosses.append(cross_z)
+
+        # Convex if all cross products have the same sign (all positive or all negative)
+        if all(c > 0 for c in crosses) or all(c < 0 for c in crosses):
+            return True
+        return False
     
     def _do_segments_intersect(self, p1, p2, p3, p4):
         """Check if two line segments intersect"""
@@ -561,6 +570,203 @@ class MeshEnvironment(gym.Env):
         """Check if polygon is a quadrilateral"""
         return len(polygon) == 4
     
+    def enumerate_valid_actions(self, n_angle=12, n_dist=4):
+        """Enumerate all valid discrete actions for the current boundary state.
+
+        Returns:
+            actions: list of (action_type, new_vertex_or_None) tuples
+            mask: boolean np.array of shape (1 + n_angle*n_dist,)
+        """
+        if hasattr(self, '_cached_actions') and self._cached_actions is not None:
+            return self._cached_actions
+
+        max_actions = 1 + n_angle * n_dist
+
+        # Try vertices in order of increasing interior angle (fallback logic)
+        vertex_order = self._get_vertices_by_angle()
+
+        for ref_vertex in vertex_order:
+            actions, mask = self._enumerate_for_vertex(ref_vertex, n_angle, n_dist, max_actions)
+            if np.any(mask):
+                self._cached_actions = (actions, mask)
+                return actions, mask
+
+        # No vertex yields valid actions — return all-False mask
+        actions = [(0, None)] + [(1, None)] * (n_angle * n_dist)
+        mask = np.zeros(max_actions, dtype=bool)
+        self._cached_actions = (actions, mask)
+        return actions, mask
+
+    def _get_vertices_by_angle(self):
+        """Return boundary vertices sorted by interior angle (smallest first)."""
+        if len(self.boundary) == 0:
+            return []
+        if len(self.boundary) <= 2:
+            return [self.boundary[0]]
+
+        angles_and_verts = []
+        for i in range(len(self.boundary)):
+            angles = []
+            for j in range(1, min(self.n_rv + 1, len(self.boundary))):
+                left_idx = (i - j) % len(self.boundary)
+                right_idx = (i + j) % len(self.boundary)
+
+                v1 = self.boundary[left_idx] - self.boundary[i]
+                v2 = self.boundary[right_idx] - self.boundary[i]
+
+                v1_norm = v1 / max(1e-10, np.linalg.norm(v1))
+                v2_norm = v2 / max(1e-10, np.linalg.norm(v2))
+
+                dot_product = np.clip(np.dot(v1_norm, v2_norm), -1.0, 1.0)
+                angle = np.arccos(dot_product)
+                angles.append(angle)
+
+            avg_angle = np.mean(angles)
+            angles_and_verts.append((avg_angle, i))
+
+        angles_and_verts.sort(key=lambda x: x[0])
+        return [self.boundary[idx] for _, idx in angles_and_verts]
+
+    def _enumerate_for_vertex(self, ref_vertex, n_angle, n_dist, max_actions):
+        """Enumerate valid actions for a specific reference vertex."""
+        actions = []
+        mask = np.zeros(max_actions, dtype=bool)
+
+        # --- Type-0: deterministic quad from existing boundary vertices ---
+        element, valid = self._form_element(ref_vertex, 0, None)
+        actions.append((0, None))
+        mask[0] = valid
+
+        # --- Type-1: grid over fan-shaped interior angle ---
+        ref_idx = -1
+        for i, v in enumerate(self.boundary):
+            if np.array_equal(v, ref_vertex):
+                ref_idx = i
+                break
+
+        if ref_idx == -1:
+            # Pad remaining slots
+            for _ in range(n_angle * n_dist):
+                actions.append((1, None))
+            return actions, mask
+
+        radius = self._calculate_fan_shape_radius(ref_vertex)
+
+        # Compute angular range (same logic as _get_fan_shape_points)
+        left_idx = (ref_idx - 1) % len(self.boundary)
+        right_idx = (ref_idx + 1) % len(self.boundary)
+
+        left_v = self.boundary[left_idx] - ref_vertex
+        right_v = self.boundary[right_idx] - ref_vertex
+
+        left_angle = np.arctan2(left_v[1], left_v[0])
+        right_angle = np.arctan2(right_v[1], right_v[0])
+
+        if right_angle < left_angle:
+            right_angle += 2 * np.pi
+
+        # Grid: n_angle angles x n_dist distances
+        angle_bins = np.linspace(left_angle, right_angle, n_angle + 2)[1:-1]  # interior angles only
+        dist_bins = np.linspace(0.2, 1.0, n_dist) * radius  # avoid zero distance
+
+        idx = 1  # action index (0 is type-0)
+        for angle in angle_bins:
+            for dist in dist_bins:
+                new_vertex = ref_vertex + np.array([
+                    dist * np.cos(angle),
+                    dist * np.sin(angle)
+                ])
+                element, valid = self._form_element(ref_vertex, 1, new_vertex)
+                actions.append((1, new_vertex if valid else None))
+                mask[idx] = valid
+                idx += 1
+
+        return actions, mask
+
+    def _get_enriched_state(self):
+        """Create enriched 44-float state representation."""
+        base_state = self._get_state()  # 22 floats
+
+        # Boundary vertex count (normalized by initial count)
+        boundary_count = len(self.boundary) / len(self.initial_boundary)
+
+        # Elements placed (normalized — assume max ~50 elements)
+        elements_placed = len(self.elements) / max(1, len(self.initial_boundary) * 4)
+
+        # Num valid actions (normalized by max_actions=49)
+        if hasattr(self, '_cached_actions') and self._cached_actions is not None:
+            _, mask = self._cached_actions
+            num_valid = np.sum(mask) / len(mask)
+        else:
+            num_valid = 0.0
+
+        # Boundary shape: 8 evenly-spaced boundary samples as (x, y) = 16 floats
+        boundary_samples = self._sample_boundary_points(8)
+
+        # Action-type availability: 2 booleans
+        if hasattr(self, '_cached_actions') and self._cached_actions is not None:
+            _, mask = self._cached_actions
+            type0_valid = float(mask[0])
+            type1_valid = float(np.any(mask[1:]))
+        else:
+            type0_valid = 0.0
+            type1_valid = 0.0
+
+        enriched = np.concatenate([
+            base_state,                          # 22
+            [boundary_count],                    # 1
+            [elements_placed],                   # 1
+            [num_valid],                         # 1
+            boundary_samples.flatten(),          # 16
+            [type0_valid, type1_valid],          # 2
+        ]).astype(np.float32)                    # total = 43... need 44
+
+        # Pad to exactly 44 if needed
+        if len(enriched) < 44:
+            enriched = np.pad(enriched, (0, 44 - len(enriched)))
+        elif len(enriched) > 44:
+            enriched = enriched[:44]
+
+        return enriched
+
+    def _sample_boundary_points(self, n_samples):
+        """Sample n evenly-spaced points along the boundary polygon."""
+        if len(self.boundary) < 2:
+            return np.zeros((n_samples, 2))
+
+        # Compute cumulative edge lengths
+        edges = np.diff(np.vstack([self.boundary, self.boundary[0:1]]), axis=0)
+        edge_lengths = np.linalg.norm(edges, axis=1)
+        cum_lengths = np.concatenate([[0], np.cumsum(edge_lengths)])
+        total_length = cum_lengths[-1]
+
+        if total_length < 1e-10:
+            return np.zeros((n_samples, 2))
+
+        # Sample at evenly-spaced arc lengths
+        sample_lengths = np.linspace(0, total_length, n_samples, endpoint=False)
+        points = []
+
+        for s in sample_lengths:
+            # Find which edge this sample falls on
+            edge_idx = np.searchsorted(cum_lengths[1:], s, side='right')
+            edge_idx = min(edge_idx, len(self.boundary) - 1)
+
+            # Interpolate along that edge
+            local_s = s - cum_lengths[edge_idx]
+            edge_len = edge_lengths[edge_idx]
+            t = local_s / edge_len if edge_len > 1e-10 else 0.0
+
+            p1 = self.boundary[edge_idx]
+            p2 = self.boundary[(edge_idx + 1) % len(self.boundary)]
+            points.append(p1 + t * (p2 - p1))
+
+        return np.array(points)
+
+    def _invalidate_action_cache(self):
+        """Clear the cached valid actions."""
+        self._cached_actions = None
+
     def plot_domain(self):
         """Plot the initial domain with interior points"""
         plt.figure(figsize=(8, 8))
