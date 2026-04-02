@@ -379,20 +379,13 @@ class MeshEnvironment(gym.Env):
         left_angle = np.arctan2(left_v[1], left_v[0])
         right_angle = np.arctan2(right_v[1], right_v[0])
 
-        # Cross product: left_v x right_v. If positive (CCW boundary), the interior
-        # is the arc from right_angle to left_angle going CCW.
-        cross = left_v[0] * right_v[1] - left_v[1] * right_v[0]
+        # Interior (unmeshed region) is on the LEFT of the CCW boundary.
+        # The fan sweeps the reflex arc from right_angle to left_angle.
+        # Ensure left_angle > right_angle so linspace goes the long way around.
+        if left_angle <= right_angle:
+            left_angle += 2 * np.pi
 
-        if cross > 0:
-            # CCW boundary: interior sweeps from right_angle to left_angle (CCW)
-            if left_angle < right_angle:
-                left_angle += 2 * np.pi
-        else:
-            # CW boundary: interior sweeps from left_angle to right_angle
-            if right_angle < left_angle:
-                right_angle += 2 * np.pi
-
-        angles = np.linspace(left_angle, right_angle, self.g+2)[1:-1]
+        angles = np.linspace(right_angle, left_angle, self.g+2)[1:-1]
         
         for angle in angles:
             direction = np.array([np.cos(angle), np.sin(angle)])
@@ -430,40 +423,48 @@ class MeshEnvironment(gym.Env):
             if np.allclose(v, reference_vertex, atol=1e-10):
                 ref_idx = i
                 break
-        
+
+        return self._form_element_fast(reference_vertex, action_type, new_vertex, ref_idx)
+
+    def _form_element_fast(self, reference_vertex, action_type, new_vertex, ref_idx):
+        """Form a quadrilateral element (with pre-computed ref_idx)."""
         if ref_idx == -1:
             return None, False
-        
+
         if action_type == 0:
             # Use existing vertices
             if len(self.boundary) < 4:
                 return None, False
-            
+
             v1 = reference_vertex
             v2 = self.boundary[(ref_idx + 1) % len(self.boundary)]
             v3 = self.boundary[(ref_idx + 2) % len(self.boundary)]
             v4 = self.boundary[(ref_idx - 1) % len(self.boundary)]
-            
+
         elif action_type == 1:
             # Add one new vertex
             if len(self.boundary) < 3:
                 return None, False
-            
+
+            # New vertex must be inside the current boundary polygon
+            if not self._point_in_polygon(new_vertex, self.boundary):
+                return None, False
+
             v1 = reference_vertex
             v2 = self.boundary[(ref_idx + 1) % len(self.boundary)]
             v3 = new_vertex
             v4 = self.boundary[(ref_idx - 1) % len(self.boundary)]
-            
+
         else:
             # Not fully implemented - type 2 would add two vertices
             return None, False
-        
+
         element = np.array([v1, v2, v3, v4])
-        
+
         # Validate the element
         if not self._is_valid_quad(element):
             return None, False
-        
+
         return element, True
     
     def _is_valid_quad(self, quad):
@@ -532,6 +533,156 @@ class MeshEnvironment(gym.Env):
         
         return False
     
+    def _has_self_intersection(self, quad):
+        """Check if a quadrilateral has self-intersecting edges (ignoring convexity)."""
+        edges = [
+            (quad[0], quad[1]),
+            (quad[1], quad[2]),
+            (quad[2], quad[3]),
+            (quad[3], quad[0])
+        ]
+        for i in range(len(edges)):
+            for j in range(i+2, len(edges)):
+                if i == 0 and j == 3:
+                    continue
+                if self._do_segments_intersect(edges[i][0], edges[i][1], edges[j][0], edges[j][1]):
+                    return True
+        return False
+
+    def _point_in_polygon(self, point, polygon):
+        """Ray-casting test: True if point is inside the polygon."""
+        n = len(polygon)
+        inside = False
+        px, py = point[0], point[1]
+        j = n - 1
+        for i in range(n):
+            xi, yi = polygon[i][0], polygon[i][1]
+            xj, yj = polygon[j][0], polygon[j][1]
+            if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+                inside = not inside
+            j = i
+        return inside
+
+    def _batch_point_in_polygon(self, points, polygon):
+        """Vectorized ray-casting test for multiple points against one polygon.
+
+        Args:
+            points: (N, 2) array of query points
+            polygon: (M, 2) array of polygon vertices
+
+        Returns:
+            (N,) boolean array — True if point is inside the polygon.
+        """
+        n = len(polygon)
+        px = points[:, 0]  # (N,)
+        py = points[:, 1]  # (N,)
+        inside = np.zeros(len(points), dtype=bool)
+
+        # Polygon edges: j -> i for i in range(n), j = i-1
+        xi = polygon[:, 0]  # (M,)
+        yi = polygon[:, 1]  # (M,)
+        xj = np.roll(xi, 1)
+        yj = np.roll(yi, 1)
+
+        for k in range(n):
+            # Edge from vertex j=k-1 to vertex i=k
+            x_i, y_i = xi[k], yi[k]
+            x_j, y_j = xj[k], yj[k]
+
+            # Condition: (yi > py) != (yj > py) and px < intercept
+            cond1 = (y_i > py) != (y_j > py)
+            # Avoid division when cond1 is False (safe since we only use where cond1)
+            denom = y_j - y_i
+            if abs(denom) < 1e-30:
+                continue
+            intercept = (x_j - x_i) * (py - y_i) / denom + x_i
+            cond2 = px < intercept
+            inside ^= (cond1 & cond2)
+
+        return inside
+
+    def _batch_is_valid_quad(self, quads):
+        """Vectorized quad validation for a batch of quads.
+
+        Args:
+            quads: (N, 4, 2) array of quadrilateral vertices
+
+        Returns:
+            (N,) boolean array — True if quad is valid.
+        """
+        N = len(quads)
+
+        # --- Check convexity (vectorized cross products) ---
+        # For each vertex i in [0,1,2,3], compute cross product of
+        # (quad[prev] - quad[i]) x (quad[next] - quad[i])
+        prev_indices = [3, 0, 1, 2]
+        next_indices = [1, 2, 3, 0]
+
+        crosses = np.empty((N, 4))
+        for k in range(4):
+            v1 = quads[:, prev_indices[k], :] - quads[:, k, :]  # (N, 2)
+            v2 = quads[:, next_indices[k], :] - quads[:, k, :]  # (N, 2)
+            crosses[:, k] = v1[:, 0] * v2[:, 1] - v1[:, 1] * v2[:, 0]
+
+        all_pos = np.all(crosses > 0, axis=1)
+        all_neg = np.all(crosses < 0, axis=1)
+        convex = all_pos | all_neg
+
+        # --- Check for self-intersections (only non-adjacent edge pairs) ---
+        # Edge pairs to check: (0,2) — edges 0-1 vs 2-3
+        # That's the only non-adjacent, non-wrapping pair: i=0,j=2
+        # (i=0,j=3 is skipped; i=1,j=3 is the other pair)
+        # Actually: pairs are (i,j) for j in range(i+2, 4), skip (0,3)
+        # So only (0,2) and (1,3)
+        no_intersect = np.ones(N, dtype=bool)
+
+        # Check pair (edge 0, edge 2): edge 0 = (q0,q1), edge 2 = (q2,q3)
+        no_intersect &= ~self._batch_segments_intersect(
+            quads[:, 0], quads[:, 1], quads[:, 2], quads[:, 3])
+
+        # Check pair (edge 1, edge 3): edge 1 = (q1,q2), edge 3 = (q3,q0)
+        no_intersect &= ~self._batch_segments_intersect(
+            quads[:, 1], quads[:, 2], quads[:, 3], quads[:, 0])
+
+        return convex & no_intersect
+
+    def _batch_segments_intersect(self, p1, p2, p3, p4):
+        """Vectorized segment intersection test.
+
+        Args:
+            p1, p2, p3, p4: each (N, 2) arrays
+
+        Returns:
+            (N,) boolean array — True if segments (p1,p2) and (p3,p4) intersect.
+        """
+        def orientation(p, q, r):
+            val = (q[:, 1] - p[:, 1]) * (r[:, 0] - q[:, 0]) - \
+                  (q[:, 0] - p[:, 0]) * (r[:, 1] - q[:, 1])
+            # 0 = collinear, 1 = clockwise, 2 = counterclockwise
+            result = np.zeros(len(p), dtype=np.int8)
+            result[val > 0] = 1
+            result[val < 0] = 2
+            return result
+
+        def on_segment(p, q, r):
+            return ((q[:, 0] <= np.maximum(p[:, 0], r[:, 0])) &
+                    (q[:, 0] >= np.minimum(p[:, 0], r[:, 0])) &
+                    (q[:, 1] <= np.maximum(p[:, 1], r[:, 1])) &
+                    (q[:, 1] >= np.minimum(p[:, 1], r[:, 1])))
+
+        o1 = orientation(p1, p2, p3)
+        o2 = orientation(p1, p2, p4)
+        o3 = orientation(p3, p4, p1)
+        o4 = orientation(p3, p4, p2)
+
+        intersect = (o1 != o2) & (o3 != o4)
+        intersect |= (o1 == 0) & on_segment(p1, p3, p2)
+        intersect |= (o2 == 0) & on_segment(p1, p4, p2)
+        intersect |= (o3 == 0) & on_segment(p3, p1, p4)
+        intersect |= (o4 == 0) & on_segment(p3, p2, p4)
+
+        return intersect
+
     def _update_boundary(self, new_element):
         """Update boundary after adding a new element using splice-based algorithm.
 
@@ -648,12 +799,14 @@ class MeshEnvironment(gym.Env):
         for ref_vertex in vertex_order:
             actions, mask = self._enumerate_for_vertex(ref_vertex, n_angle, n_dist, max_actions)
             if np.any(mask):
+                self._cached_ref_vertex = ref_vertex.copy()
                 self._cached_actions = (actions, mask)
                 return actions, mask
 
         # No vertex yields valid actions — return all-False mask
         actions = [(0, None)] + [(1, None)] * (n_angle * n_dist)
         mask = np.zeros(max_actions, dtype=bool)
+        self._cached_ref_vertex = vertex_order[0].copy() if vertex_order else None
         self._cached_actions = (actions, mask)
         return actions, mask
 
@@ -688,22 +841,23 @@ class MeshEnvironment(gym.Env):
         return [self.boundary[idx] for _, idx in angles_and_verts]
 
     def _enumerate_for_vertex(self, ref_vertex, n_angle, n_dist, max_actions):
-        """Enumerate valid actions for a specific reference vertex."""
+        """Enumerate valid actions for a specific reference vertex (vectorized)."""
         actions = []
         mask = np.zeros(max_actions, dtype=bool)
 
-        # --- Type-0: deterministic quad from existing boundary vertices ---
-        element, valid = self._form_element(ref_vertex, 0, None)
-        actions.append((0, None))
-        mask[0] = valid
-
-        # --- Type-1: grid over fan-shaped interior angle ---
+        # --- Find ref_idx once for the whole method ---
         ref_idx = -1
         for i, v in enumerate(self.boundary):
             if np.allclose(v, ref_vertex, atol=1e-10):
                 ref_idx = i
                 break
 
+        # --- Type-0: deterministic quad from existing boundary vertices ---
+        element, valid = self._form_element_fast(ref_vertex, 0, None, ref_idx)
+        actions.append((0, None))
+        mask[0] = valid
+
+        # --- Type-1: grid over fan-shaped interior angle ---
         if ref_idx == -1:
             # Pad remaining slots
             for _ in range(n_angle * n_dist):
@@ -713,8 +867,9 @@ class MeshEnvironment(gym.Env):
         radius = self._calculate_fan_shape_radius(ref_vertex)
 
         # Compute angular range (same logic as _get_fan_shape_points)
-        left_idx = (ref_idx - 1) % len(self.boundary)
-        right_idx = (ref_idx + 1) % len(self.boundary)
+        n_bnd = len(self.boundary)
+        left_idx = (ref_idx - 1) % n_bnd
+        right_idx = (ref_idx + 1) % n_bnd
 
         left_v = self.boundary[left_idx] - ref_vertex
         right_v = self.boundary[right_idx] - ref_vertex
@@ -722,30 +877,49 @@ class MeshEnvironment(gym.Env):
         left_angle = np.arctan2(left_v[1], left_v[0])
         right_angle = np.arctan2(right_v[1], right_v[0])
 
-        # Use cross product to sweep the interior arc
-        cross = left_v[0] * right_v[1] - left_v[1] * right_v[0]
-        if cross > 0:
-            if left_angle < right_angle:
-                left_angle += 2 * np.pi
-        else:
-            if right_angle < left_angle:
-                right_angle += 2 * np.pi
+        # Interior is on the LEFT of the CCW boundary — sweep the reflex arc.
+        if left_angle <= right_angle:
+            left_angle += 2 * np.pi
 
-        # Grid: n_angle angles x n_dist distances
-        angle_bins = np.linspace(left_angle, right_angle, n_angle + 2)[1:-1]  # interior angles only
-        dist_bins = np.linspace(0.2, 1.0, n_dist) * radius  # avoid zero distance
+        # Grid: n_angle angles x n_dist distances — vectorized
+        angle_bins = np.linspace(right_angle, left_angle, n_angle + 2)[1:-1]
+        dist_bins = np.linspace(0.2, 1.0, n_dist) * radius
 
-        idx = 1  # action index (0 is type-0)
-        for angle in angle_bins:
-            for dist in dist_bins:
-                new_vertex = ref_vertex + np.array([
-                    dist * np.cos(angle),
-                    dist * np.sin(angle)
-                ])
-                element, valid = self._form_element(ref_vertex, 1, new_vertex)
-                actions.append((1, new_vertex if valid else None))
-                mask[idx] = valid
-                idx += 1
+        # Build all candidate vertices at once: shape (n_angle * n_dist, 2)
+        angle_grid, dist_grid = np.meshgrid(angle_bins, dist_bins, indexing='ij')
+        angles_flat = angle_grid.ravel()
+        dists_flat = dist_grid.ravel()
+        offsets = np.column_stack([dists_flat * np.cos(angles_flat),
+                                   dists_flat * np.sin(angles_flat)])
+        candidates = ref_vertex + offsets  # (N, 2)
+        n_candidates = len(candidates)
+
+        # --- Batch point-in-polygon for all candidates ---
+        pip_mask = self._batch_point_in_polygon(candidates, self.boundary)
+
+        # --- For PIP-passing candidates, batch form quads and validate ---
+        v2 = self.boundary[(ref_idx + 1) % n_bnd]
+        v4 = self.boundary[(ref_idx - 1) % n_bnd]
+
+        # Build all quads: shape (n_candidates, 4, 2)
+        # quad[k] = [ref_vertex, v2, candidates[k], v4]
+        all_quads = np.empty((n_candidates, 4, 2))
+        all_quads[:, 0, :] = ref_vertex
+        all_quads[:, 1, :] = v2
+        all_quads[:, 2, :] = candidates
+        all_quads[:, 3, :] = v4
+
+        # Batch validate quads (only where pip passed)
+        valid_mask = np.zeros(n_candidates, dtype=bool)
+        pip_indices = np.where(pip_mask)[0]
+        if len(pip_indices) > 0:
+            valid_mask[pip_indices] = self._batch_is_valid_quad(all_quads[pip_indices])
+
+        # Build actions list
+        for k in range(n_candidates):
+            v = bool(valid_mask[k])
+            actions.append((1, candidates[k] if v else None))
+            mask[1 + k] = v
 
         return actions, mask
 
@@ -839,6 +1013,7 @@ class MeshEnvironment(gym.Env):
     def _invalidate_action_cache(self):
         """Clear the cached valid actions."""
         self._cached_actions = None
+        self._cached_ref_vertex = None
 
     def plot_domain(self):
         """Plot the initial domain with interior points"""

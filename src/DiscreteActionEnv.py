@@ -23,6 +23,7 @@ class DiscreteActionEnv(gym.Wrapper):
         self.max_actions = 1 + n_angle * n_dist  # 49
         self.no_valid_penalty = no_valid_penalty
         self._prev_boundary_count = None
+        self._prev_area_ratio = None
 
         self.action_space = spaces.Discrete(self.max_actions)
         self.observation_space = spaces.Box(
@@ -35,6 +36,7 @@ class DiscreteActionEnv(gym.Wrapper):
     def reset(self, **kwargs):
         state, info = self.env.reset(**kwargs)
         self._prev_boundary_count = len(self.env.boundary)
+        self._prev_area_ratio = 1.0
         self._enumerate()
         enriched = self.env._get_enriched_state()
         info["action_mask"] = self._action_mask.copy()
@@ -53,8 +55,10 @@ class DiscreteActionEnv(gym.Wrapper):
         # Look up pre-computed action
         action_type, new_vertex = self._valid_actions[action_index]
 
-        # Delegate to underlying environment
-        ref_vertex = self.env._select_reference_vertex()
+        # Use the same reference vertex that enumerate used (critical for consistency)
+        ref_vertex = self.env._cached_ref_vertex
+        if ref_vertex is None:
+            ref_vertex = self.env._select_reference_vertex()
         ref_idx = -1
         for i, v in enumerate(self.env.boundary):
             if np.allclose(v, ref_vertex, atol=1e-10):
@@ -86,23 +90,53 @@ class DiscreteActionEnv(gym.Wrapper):
         area_ratio = remaining_area / max(1e-10, self.env.original_area)
 
         done = False
-        if len(self.env.boundary) < 3:
-            # Boundary fully consumed — meshing complete
-            reward = 10.0
+        bnd_len = len(self.env.boundary)
+        if bnd_len < 3:
+            # Boundary fully consumed — all quads, best possible outcome
+            mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0
+            reward = 5.0 + 10.0 * mean_q  # highest reward tier
             done = True
-        elif (len(self.env.boundary) == 4
-              and self.env._is_valid_quad(np.array(self.env.boundary))):
-            reward = 10.0
+        elif bnd_len == 3:
+            # Triangle remainder at boundary — acceptable but penalized
+            self.env.elements.append(np.array(self.env.boundary))
+            self.env.element_qualities.append(0.3)
+            mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0
+            reward = 2.0 + 4.0 * mean_q  # moderate penalty vs all-quad
             done = True
+        elif bnd_len == 4:
+            bnd_quad = np.array(self.env.boundary)
+            # Accept any non-self-intersecting quad (convex or concave)
+            if not self.env._has_self_intersection(bnd_quad):
+                quality_final = self.env._calculate_element_quality(bnd_quad)
+                self.env.elements.append(bnd_quad)
+                self.env.element_qualities.append(quality_final)
+                mean_q = np.mean(self.env.element_qualities)
+                reward = 5.0 + 10.0 * mean_q  # all-quad tier
+                done = True
+            else:
+                # Self-intersecting quad → 2 triangles (worst outcome)
+                bnd = self.env.boundary
+                self.env.elements.append(np.array([bnd[0], bnd[1], bnd[2]]))
+                self.env.elements.append(np.array([bnd[0], bnd[2], bnd[3]]))
+                self.env.element_qualities.extend([0.2, 0.2])
+                mean_q = np.mean(self.env.element_qualities)
+                reward = 0.5 + 2.0 * mean_q  # heavy penalty
+                done = True
         else:
-            reward = self.env._calculate_reward(new_element, quality, area_ratio)
+            # Dense reward: quality + area progress + step penalty
+            reward = quality  # [0, 1] — direct quality signal
 
-            # Progress shaping: reward for boundary shrinkage
-            curr_count = len(self.env.boundary)
-            if self._prev_boundary_count is not None and self._prev_boundary_count > 0:
-                shrinkage = (self._prev_boundary_count - curr_count) / len(self.env.initial_boundary)
-                reward += 0.5 * shrinkage
-            self._prev_boundary_count = curr_count
+            # Area consumed this step (positive = good)
+            prev_area = self._prev_area_ratio if self._prev_area_ratio is not None else 1.0
+            area_consumed = prev_area - area_ratio
+            reward += 2.0 * area_consumed  # scale up area progress
+
+            # Step penalty to encourage efficiency
+            reward -= 0.01
+
+        self._prev_area_ratio = area_ratio
+        # Track boundary for info
+        self._prev_boundary_count = len(self.env.boundary)
 
         # Re-enumerate for next state (skip if done — boundary may be degenerate)
         if not done:
