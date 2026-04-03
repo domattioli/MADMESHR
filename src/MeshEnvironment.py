@@ -597,6 +597,33 @@ class MeshEnvironment(gym.Env):
 
         return False
 
+    def compute_min_boundary_angle(self):
+        """Compute the minimum interior angle (degrees) of the remaining boundary polygon.
+
+        Used for eta_b (boundary quality penalty) in Pan et al.'s reward.
+        Returns 180.0 if boundary has fewer than 3 vertices.
+        """
+        bnd = self.boundary
+        n = len(bnd)
+        if n < 3:
+            return 180.0
+
+        min_angle = 360.0
+        for i in range(n):
+            prev_idx = (i - 1) % n
+            next_idx = (i + 1) % n
+            v1 = bnd[prev_idx] - bnd[i]
+            v2 = bnd[next_idx] - bnd[i]
+            v1_norm = np.linalg.norm(v1)
+            v2_norm = np.linalg.norm(v2)
+            if v1_norm < 1e-12 or v2_norm < 1e-12:
+                continue
+            dot = np.clip(np.dot(v1, v2) / (v1_norm * v2_norm), -1.0, 1.0)
+            angle = np.arccos(dot) * 180.0 / np.pi
+            if angle < min_angle:
+                min_angle = angle
+        return min_angle
+
     def is_boundary_triangle(self, triangle):
         """Check if a triangle has at least one edge on the original domain boundary."""
         tri = np.asarray(triangle)

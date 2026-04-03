@@ -191,7 +191,76 @@ def parse_args():
     parser.add_argument('--eval-only', action='store_true',
                         help='Skip training, just evaluate loaded model')
 
+    # Greedy baseline
+    parser.add_argument('--greedy', action='store_true',
+                        help='Run greedy-by-quality rollout (no training)')
+
     return parser.parse_args()
+
+
+def run_greedy(boundary, domain_name, n_angle=12, n_dist=4):
+    """Run a greedy-by-quality rollout and save visualization."""
+    from src.DiscreteActionEnv import DiscreteActionEnv
+    from src.utils.visualization import save_mesh_result
+
+    env = MeshEnvironment(initial_boundary=boundary)
+    discrete_env = DiscreteActionEnv(env, n_angle=n_angle, n_dist=n_dist)
+
+    state, info = discrete_env.reset()
+    done = False
+    steps = 0
+    total_reward = 0
+
+    while not done and steps < 30:
+        mask = info["action_mask"]
+        valid_indices = np.where(mask)[0]
+        if len(valid_indices) == 0:
+            break
+
+        # Evaluate quality for each valid action
+        best_action = None
+        best_quality = -1
+        ref_vertex = env._cached_ref_vertex
+        for action_idx in valid_indices:
+            action_type, new_vertex = discrete_env._valid_actions[action_idx]
+            element, valid = env._form_element(ref_vertex, action_type, new_vertex)
+            if valid and len(element) == 4:
+                q = env._calculate_element_quality(element)
+                if q > best_quality:
+                    best_quality = q
+                    best_action = action_idx
+
+        if best_action is None:
+            # No quad actions — take first valid
+            best_action = valid_indices[0]
+
+        state, reward, done, truncated, info = discrete_env.step(best_action)
+        total_reward += reward
+        steps += 1
+        if truncated:
+            break
+
+    filepath = save_mesh_result(env, f"{domain_name}_greedy", "output/latest")
+
+    n_quads = sum(1 for e in env.elements if len(e) == 4)
+    n_tris = sum(1 for e in env.elements if len(e) == 3)
+    mean_q = np.mean(env.element_qualities) if env.element_qualities else 0
+
+    print(f"Greedy {domain_name}: return={total_reward:.2f} | "
+          f"quality={mean_q:.3f} | "
+          f"elements={len(env.elements)} ({n_quads}Q+{n_tris}T) | "
+          f"complete={done} | steps={steps}")
+
+    return {
+        "domain": domain_name,
+        "return": total_reward,
+        "mean_quality": mean_q,
+        "n_elements": len(env.elements),
+        "n_quads": n_quads,
+        "n_triangles": n_tris,
+        "completed": done,
+        "steps": steps,
+    }
 
 
 def main():
@@ -201,6 +270,10 @@ def main():
     boundary = DOMAINS[args.domain]()
     env = MeshEnvironment(initial_boundary=boundary)
     print(f"Domain: {args.domain} ({len(boundary)} vertices)")
+
+    if args.greedy:
+        run_greedy(boundary, args.domain, n_angle=args.n_angle, n_dist=args.n_dist)
+        return
 
     if args.algorithm == 'dqn':
         from src.DiscreteActionEnv import DiscreteActionEnv

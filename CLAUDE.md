@@ -27,6 +27,9 @@ pytest tests/ -v
 # Run a single test
 pytest tests/test_discrete_env.py::TestActionEnumeration::test_type0_always_present -v
 
+# Run greedy-by-quality baseline (no training)
+python main.py --domain star --greedy
+
 # Analyze quality ceiling for a domain
 python quality_diagnostic.py
 ```
@@ -61,8 +64,8 @@ main.py (CLI + domain registry)
 ### State Representation
 44-float enriched vector: boundary context (neighbor positions, angles) + fan-shape sample points + area ratio.
 
-### Reward Structure
-Per-step: `quality_weight * element_quality + area_progress - step_penalty`. Completion bonus for finishing the mesh. Quality metric is scaled Jacobian (0-1 range).
+### Reward Structure (Pan et al.)
+Per-step: `r = eta_e + eta_b + mu` where eta_e = element quality (0 to 1), eta_b = boundary angle penalty (-1 to 0), mu = density penalty (-1 to 0). Completion: flat +10. Quality metric is sqrt(q_edge * q_angle) (0-1 range). See `DiscreteActionEnv.step()` for implementation.
 
 ## Key Patterns
 
@@ -88,6 +91,7 @@ All development sessions must follow the adversarial planning process documented
 
 ## Known Issues
 
-- DQN tends to reward-farm: places 20-44 elements per episode (optimal ~5) because intermediate quality rewards dominate the completion bonus.
+- Reward farming was fixed in session 3, and Pan et al. reward was implemented in session 4. Agent now uses very few elements (4 on star, 3 on octagon) but individual element quality is low (star=0.223). The eta_b boundary penalty may be driving the agent to minimize steps rather than place quality elements.
 - Quality ceiling is geometry-limited (star≈0.44, circle≈0.78, octagon≈0.61), not discretization-limited.
 - SAC agent (`src/SAC.py`, `src/trainer.py`) is legacy and does not learn effectively — DQN is the active approach.
+- Rectangle (20v) scales: 100% completion with 9 elements, quality=0.464.

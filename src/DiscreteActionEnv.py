@@ -93,8 +93,7 @@ class DiscreteActionEnv(gym.Wrapper):
         bnd_len = len(self.env.boundary)
         if bnd_len < 3:
             # Boundary fully consumed — all quads, best possible outcome
-            mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0
-            reward = 5.0 + 10.0 * mean_q ** 2  # quadratic: penalizes low quality smoothly
+            reward = 10.0  # flat completion bonus (Pan et al.)
             done = True
         elif bnd_len == 3:
             # Triangle remainder — check if boundary or interior
@@ -102,11 +101,10 @@ class DiscreteActionEnv(gym.Wrapper):
             self.env.elements.append(tri)
             self.env.element_qualities.append(0.3)
             self.env.boundary = np.empty((0, 2))
-            mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0
             if self.env.is_boundary_triangle(tri):
-                reward = 2.0 + 4.0 * mean_q  # boundary triangle: moderate penalty
+                reward = 6.0  # boundary triangle: reduced completion bonus
             else:
-                reward = 0.5 + 1.0 * mean_q  # interior triangle: heavy penalty
+                reward = 3.0  # interior triangle: heavy penalty
             done = True
         elif bnd_len == 4:
             bnd_quad = np.array(self.env.boundary)
@@ -116,8 +114,7 @@ class DiscreteActionEnv(gym.Wrapper):
                 self.env.elements.append(bnd_quad)
                 self.env.element_qualities.append(quality_final)
                 self.env.boundary = np.empty((0, 2))
-                mean_q = np.mean(self.env.element_qualities)
-                reward = 5.0 + 10.0 * mean_q ** 2  # quadratic: penalizes low quality smoothly
+                reward = 10.0  # flat completion bonus (Pan et al.)
                 done = True
             else:
                 # Self-intersecting quad → 2 triangles (worst outcome)
@@ -126,20 +123,32 @@ class DiscreteActionEnv(gym.Wrapper):
                 self.env.elements.append(np.array([bnd[0], bnd[2], bnd[3]]))
                 self.env.element_qualities.extend([0.2, 0.2])
                 self.env.boundary = np.empty((0, 2))
-                mean_q = np.mean(self.env.element_qualities)
-                reward = 0.5 + 2.0 * mean_q  # heavy penalty
+                reward = 2.0  # worst completion
                 done = True
         else:
-            # Dense reward: quality-weighted + area progress + step penalty
-            reward = 0.3 * quality  # [0, 0.3] — quality signal (reduced from 2.0)
+            # --- Pan et al. per-step reward: r = eta_e + eta_b + mu ---
 
-            # Area consumed this step (positive = good)
-            prev_area = self._prev_area_ratio if self._prev_area_ratio is not None else 1.0
-            area_consumed = prev_area - area_ratio
-            reward += 1.0 * area_consumed  # area progress
+            # eta_e: element quality at full weight (0 to 1)
+            eta_e = quality
 
-            # Step penalty to encourage efficiency
-            reward -= 0.05
+            # eta_b: boundary quality penalty (-1 to 0)
+            # Penalizes actions that leave sharp remaining angles
+            min_boundary_angle = self.env.compute_min_boundary_angle()
+            eta_b = min_boundary_angle / 180.0 - 1.0  # maps [0,180] → [-1, 0]
+
+            # mu: density penalty (-1 to 0)
+            # Penalizes elements below minimum area threshold
+            element_area = self.env._calculate_polygon_area(new_element)
+            A_min = 0.01 * self.env.original_area
+            A_max = 0.1 * self.env.original_area
+            if element_area < A_min:
+                mu = -1.0
+            elif element_area < A_max:
+                mu = (element_area - A_min) / (A_max - A_min) - 1.0
+            else:
+                mu = 0.0
+
+            reward = eta_e + eta_b + mu
 
         self._prev_area_ratio = area_ratio
         # Track boundary for info
