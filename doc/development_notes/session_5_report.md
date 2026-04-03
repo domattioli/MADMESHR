@@ -1,10 +1,10 @@
-# Session 5 Report: eta_b Rebalancing + Quality-Gated Completion
+# Session 5 Report: eta_b Rebalancing + Quality-Gated Completion + CHILmesh Integration
 
 **Date:** 2026-04-03
 
 ## Summary
 
-Scaled eta_b boundary penalty by 0.3 and replaced flat +10 completion bonus with quality-gated `5 + 10*mean_q`. Star quality improved 66% (0.223→0.371, 5Q). Other domains (octagon, rectangle, L-shape) remained stable. Added reward component logging for diagnostics. 21/21 tests passing.
+Scaled eta_b boundary penalty by 0.3 and replaced flat +10 completion bonus with quality-gated `5 + 10*mean_q`. Star quality improved 66% (0.223→0.371, 5Q). Other domains (octagon, rectangle, L-shape) remained stable. Added reward component logging for diagnostics. Fixed a sentinel value bug in CHILmesh's `_mesh_layers()`, extracted a 64-vertex non-convex subdomain from the FEM-smoothed annulus layer 2, and registered it as the `annulus-layer2` domain — the first real-world domain in MADMESHR. 21/21 tests passing.
 
 ## What Was Completed
 
@@ -89,6 +89,17 @@ Scaled eta_b boundary penalty by 0.3 and replaced flat +10 completion bonus with
 
 **Final:** q=0.459, 2Q — identical to session 4. **PASS.**
 
+### WS5: CHILmesh Bug Fix + Annulus Layer 2 Domain Extraction
+
+**CHILmesh sentinel value bug:** Found and fixed a bug in `CHILmesh._build_edge2elem()` where element index 0 collided with the "no element" sentinel value (also 0). This caused `elem2elem` adjacency corruption (element 0 reported as neighbor of every boundary element) and broke boundary edge skipping in `_mesh_layers()`. Fix: changed sentinel from 0 to -1. Added 6 tests. The layers discretization function now works correctly — verified on a 4×4 structured grid and the annulus domain (4 layers, all 580 elements assigned).
+
+**FEM smoothing + re-triangulation:** Applied FEM smoothing to the annulus domain (quality median 0.491→0.669), then Delaunay re-triangulated with boundary-aware filtering (quality median 0.660, std 0.188). Visualization pushed to CHILmesh `tests/output/annulus_smoothed_retri.png`.
+
+**Annulus layer 2 domain extraction:** Extracted the largest continuous boundary loop from the FEM-smoothed annulus layer 2 subdomain — a 64-vertex non-convex polygon. Normalized to [-1, 1] range and registered as the `annulus-layer2` domain in MADMESHR with `max_ep_len=70`. This is the first domain derived from a real mesh (vs. hand-crafted geometries). Greedy baseline: 30Q, q=0.340, incomplete (truncated at 30 steps) — significantly harder than any existing domain.
+
+**Files (CHILmesh):** `src/chilmesh/CHILmesh.py`, `tests/test_layers_annulus.py`, `tests/output/`
+**Files (MADMESHR):** `main.py`, `domains/annulus_layer2.npy`, `output/latest/annulus-layer2_greedy.png`
+
 ## Key Metrics Comparison
 
 | Metric | Session 3 | Session 4 | Session 5 | Change (S4→S5) |
@@ -101,6 +112,7 @@ Scaled eta_b boundary penalty by 0.3 and replaced flat +10 completion bonus with
 | L-shape elements | 2Q | 2Q | 2Q | Same |
 | Rectangle quality | N/A | 0.464 | 0.464 | Same |
 | Rectangle elements | N/A | 9Q | 9Q | Same |
+| Annulus-layer2 (new) | N/A | N/A | greedy: 0.340, incomplete | **First real-world domain** |
 | Tests passing | 21 | 21 | 21 | Stable |
 
 ## What Didn't Work
@@ -152,17 +164,27 @@ The 10k eval for WS2 (q=0.319, 7 elements) was misleadingly positive because eps
 |------|---------|
 | `src/DiscreteActionEnv.py` | eta_b * 0.3, quality-gated completion (5+10*mean_q), reward components in info dict |
 | `src/trainer_dqn.py` | Per-episode eta_e/eta_b/mu/bonus logging, enhanced eval with MeanQ/Elements/EtaB |
+| `main.py` | Added `annulus-layer2` domain (64v, non-convex, from CHILmesh) |
+| `domains/annulus_layer2.npy` | 64-vertex boundary polygon extracted from annulus layer 2 |
 | `CLAUDE.md` | Updated reward structure docs and known issues |
-| `output/latest/*.png` | Updated visualizations for all 4 domains |
+| `output/latest/*.png` | Updated visualizations for all 5 domains |
+
+**CHILmesh files changed:**
+
+| File | Changes |
+|------|---------|
+| `src/chilmesh/CHILmesh.py` | Fixed sentinel 0→-1 in `_build_edge2elem()`, `boundary_edges()`, `_mesh_layers()` |
+| `tests/test_layers_annulus.py` | 6 new tests for layers discretization |
+| `tests/output/*.png` | Annulus layers, smoothed+retri, layer2 boundary visualizations |
 
 ## Short-term Next Steps (Session 6)
 
-1. **Action space refinement for star.** Test 24x8 grid on star to see if finer resolution closes the 0.371→0.44 quality gap.
-2. **Octagon action space experiment.** Same 24x8 test — 78% of ceiling suggests geometric limitation.
-3. **Epsilon schedule tuning.** Current linear decay may be too fast — the WS2 experience showed quality varies significantly with epsilon level. Slower decay or higher minimum epsilon could help exploration.
+1. **Annulus-layer2 training.** First attempt at the 64-vertex non-convex domain. This is 3× larger than rectangle (20v) and highly non-convex. Will require longer training (50k+ steps) and may need increased max_ep_len or action space tuning. Key question: can the current architecture (49 actions, 44-dim state) handle a domain this complex?
+2. **Action space refinement for star.** Test 24×4 grid on star to see if finer angular resolution closes the 0.371→0.44 quality gap.
+3. **Epsilon schedule tuning.** Current linear decay may commit the agent too early on complex domains.
 
 ## Medium-term Next Steps (Sessions 7-8)
 
-4. **Transfer learning.** Now that reward is stable, test training on star → zero-shot eval on octagon. The fast convergence (3-10k steps) suggests memorization.
-5. **Curriculum training.** Train L-shape → octagon → star progression.
-6. **Multi-domain training.** Single model across all domains with domain-agnostic state encoding.
+4. **Transfer learning.** Train on simpler domains, eval zero-shot on annulus-layer2. The 64v domain is a strong test of generalization.
+5. **CHILmesh integration pipeline.** Automate: load mesh → smooth → extract layer boundary → train RL. This is the path toward a practical mesh generation tool.
+6. **Curriculum training.** L-shape → octagon → star → annulus-layer2 progression.

@@ -1,15 +1,20 @@
-# Session 6 Plan: Action Space Refinement
+# Session 6 Plan: Annulus-Layer2 Scaling + Action Space Refinement
 
 **Date:** Planned for next session after 2026-04-03
 **Status:** Final (adversarial-reviewed, two rounds of critique incorporated)
 
 ## Context
 
-Session 5 improved star quality from 0.223 to 0.371 via quality-gated completion bonus (`5 + 10*mean_q`) and eta_b scaling (0.3). All four domains complete at 100%. Remaining quality gaps:
+Session 5 improved star quality from 0.223 to 0.371 via quality-gated completion bonus (`5 + 10*mean_q`) and eta_b scaling (0.3). All four domains complete at 100%. A 64-vertex non-convex domain (`annulus-layer2`) was extracted from CHILmesh's FEM-smoothed annulus mesh layer 2 and registered as a new domain. Greedy baseline on it failed to complete (30Q, q=0.340, truncated).
+
+**Remaining quality gaps:**
 - Star: 0.371 / 0.44 ceiling = 84%
 - Octagon: 0.478 / 0.61 ceiling = 78%
+- Annulus-layer2: unknown ceiling, greedy incomplete
 
-The ceilings were characterized as "geometry-limited, not discretization-limited" in session 3. Session 6 tests whether the 12×4 action grid is a contributing factor, or whether the ceilings are truly intrinsic.
+**New priority:** The annulus-layer2 domain is the first real-world domain and a critical scaling test. Can the current architecture (49 actions, 44-dim state, Dueling DDQN) handle 64 vertices? This question takes priority over incremental quality improvements on star/octagon.
+
+The ceilings on star/octagon were characterized as "geometry-limited, not discretization-limited" in session 3. Session 6 tests both the scaling question (annulus-layer2) and whether the 12×4 action grid is a contributing factor for star.
 
 ## Adversarial Review Summary
 
@@ -31,18 +36,27 @@ The ceilings were characterized as "geometry-limited, not discretization-limited
 
 ## Workstreams
 
-### WS1: Reward Stability Diagnostic (Priority 1, ~20 min)
+### WS1: Annulus-Layer2 Scaling Test (Priority 1, ~120 min)
 
-**Problem:** Before expanding action space, verify the reward farming fix (session 3) and eta_b rebalancing (session 5) are stable. If farming recurs at 49 actions, it will be worse at 97+ actions.
+**Problem:** All domains trained so far are hand-crafted with ≤20 vertices. The annulus-layer2 domain has 64 vertices and is highly non-convex (derived from a real FEM mesh). Can the current architecture scale to this complexity?
+
+**Key unknowns:**
+- Will the agent learn to complete the domain at all? (Greedy couldn't.)
+- What's the training budget needed? Rectangle (20v) took 10k steps. 64v may need 50-100k.
+- Does the 44-dim state representation capture enough context for 64 boundary vertices?
+- Will action masking produce enough valid actions? (Initial reset showed only 1 valid action.)
 
 **Steps:**
-1. Train star 10k with current reward (12×4). Log element counts.
-2. Check: elements should be 4-8 (not 20+). If >10 average, reward farming has recurred.
-3. Run 3 eval rollouts, record quality variance.
+1. Train annulus-layer2 50k steps (12×4 grid, default hyperparams, max_ep_len=70)
+2. Eval at 10k, 20k, 30k, 40k, 50k — track completion rate, quality, element count
+3. If 0% completion at 20k: increase to 100k steps. If still 0% at 50k: diagnose (check valid action counts per step, state representation adequacy)
 
-**Verification:** Element count 4-8, quality 0.35-0.40 (consistent with session 5), no farming.
+**Verification:**
+- Completion > 0% at any eval: **PARTIAL PASS** — agent can learn on this domain
+- Completion ≥ 50% with quality > 0.25: **STRONG PASS**
+- 0% completion at 50k: **FAIL** — architecture cannot handle 64v domains. Investigate: is the bottleneck action space, state representation, or training budget?
 
-**Decision gate:** If farming detected → diagnose before proceeding. If stable → proceed to WS2.
+**Decision gate:** If FAIL, the rest of the session pivots to diagnosing why. If PASS, proceed to WS2.
 
 **Files:** No code changes. Training runs only.
 
@@ -89,7 +103,7 @@ The ceilings were characterized as "geometry-limited, not discretization-limited
 
 ### WS3: Epsilon Schedule Experiment (Priority 3, ~45 min)
 
-**Prerequisite:** WS2 star run complete (need to know whether 24×4 helps)
+**Prerequisite:** WS1 and WS2 complete
 
 **Problem:** Current linear epsilon decay (1.0 → 0.05 over 70% of training) may commit the agent to a suboptimal policy early. Session 5 showed the agent sometimes found better solutions at higher epsilon (10k eval with 7 elements) but converged to worse solutions at low epsilon (15k eval with 4 elements).
 
@@ -124,7 +138,8 @@ The ceilings were characterized as "geometry-limited, not discretization-limited
 1. Take trained star model (best from WS2/WS3)
 2. Eval zero-shot on octagon (no training, just run eval)
 3. Eval zero-shot on L-shape
-4. Record: completion rate and quality. Compare to random baseline.
+4. If WS1 produced a trained annulus-layer2 model: eval zero-shot on star
+5. Record: completion rate and quality. Compare to random baseline.
 
 **Success criterion:** Zero-shot performance better than random (return > 0, completion > 0%). If yes, transfer learning is viable and should be a session 7 workstream. If no, features are domain-specific.
 
@@ -137,10 +152,11 @@ The ceilings were characterized as "geometry-limited, not discretization-limited
 ## Execution Order with Decision Gates
 
 ```
-WS1: Reward stability diagnostic (20 min)
+WS1: Annulus-layer2 scaling test (120 min)
   |
-  ├── STABLE → WS2
-  └── FARMING → Diagnose, fix, re-verify (abort WS2-4)
+  ├── PASS (completion > 0%) → Record results, proceed to WS2
+  └── FAIL (0% at 50k) → Diagnose bottleneck (state repr? action space? budget?)
+                           Still proceed to WS2 (independent)
   
 WS2: 24×4 star training (90 min)
   |
@@ -159,29 +175,31 @@ WS4: Transfer diagnostic (20 min, if time)
 
 | Risk | Mitigation |
 |------|-----------|
+| Annulus-layer2 never completes | Diagnose: log valid action counts per step. If consistently 1 (type-0 only), the action space can't reach interior points. May need larger n_dist or continuous actions |
+| Annulus-layer2 training takes too long | Budget 50k, extend to 100k if completion rate rising. If flat at 0% after 50k, stop |
 | 24×4 doesn't improve quality | Accept geometry ceiling. Pivot to curriculum learning or continuous action space |
 | Training convergence slows with 97 actions | Budget 25k steps. If not converged at 15k, extend to 35k before declaring failure |
 | Completion rate drops with more actions | Track completion explicitly. If < 90%, action masking may have bugs at new resolution |
 | Two-phase epsilon destabilizes training | Revert to linear schedule. The linear schedule works reliably |
 | Wall-clock budget exceeded | WS4 is optional. WS3 can be deferred. Minimum viable session = WS1 + WS2 star |
-| Session 5 reward farming fix not stable | WS1 catches this before committing to larger experiments |
 
 ## What NOT to Do
 
 - **Don't test 24×8 without 24×4 first.** Ablation matters. Two variables at once = confounded results.
 - **Don't change reward structure.** Session 5's reward is working. Change one variable (action space or epsilon).
-- **Don't add new domains before understanding existing ones.** Pentagon can wait.
 - **Don't attempt multi-domain training.** No stable cross-domain baseline exists yet.
 - **Don't increase hidden layer width preemptively.** 97 actions (24×4) is a modest increase. Only change architecture if training metrics (loss convergence, Q-value distribution) indicate capacity issues.
+- **Don't tune annulus-layer2 hyperparams before seeing baseline results.** First run is diagnostic — understand the failure mode before optimizing.
 
 ## Success Criteria
 
 | Metric | Session 5 | Target | Stretch |
 |--------|-----------|--------|---------|
+| Annulus-layer2 completion | 0% (greedy) | > 0% | ≥ 50% |
+| Annulus-layer2 quality | 0.340 (greedy) | any | > 0.30 |
 | Star quality | 0.371 | ≥ 0.38 | ≥ 0.40 |
 | Octagon quality | 0.478 | ≥ 0.50 | ≥ 0.55 |
 | Star completion | 100% | ≥ 90% | 100% |
-| Reward farming | none | none | none |
 | Tests passing | 21 | 21 | 21 |
 | Transfer signal | N/A | measured | positive |
 
