@@ -101,6 +101,7 @@ class DiscreteActionEnv(gym.Wrapper):
             tri = np.array(self.env.boundary)
             self.env.elements.append(tri)
             self.env.element_qualities.append(0.3)
+            self.env.boundary = np.empty((0, 2))
             mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0
             if self.env.is_boundary_triangle(tri):
                 reward = 2.0 + 4.0 * mean_q  # boundary triangle: moderate penalty
@@ -114,6 +115,7 @@ class DiscreteActionEnv(gym.Wrapper):
                 quality_final = self.env._calculate_element_quality(bnd_quad)
                 self.env.elements.append(bnd_quad)
                 self.env.element_qualities.append(quality_final)
+                self.env.boundary = np.empty((0, 2))
                 mean_q = np.mean(self.env.element_qualities)
                 reward = 5.0 + 10.0 * mean_q ** 2  # quadratic: penalizes low quality smoothly
                 done = True
@@ -123,6 +125,7 @@ class DiscreteActionEnv(gym.Wrapper):
                 self.env.elements.append(np.array([bnd[0], bnd[1], bnd[2]]))
                 self.env.elements.append(np.array([bnd[0], bnd[2], bnd[3]]))
                 self.env.element_qualities.extend([0.2, 0.2])
+                self.env.boundary = np.empty((0, 2))
                 mean_q = np.mean(self.env.element_qualities)
                 reward = 0.5 + 2.0 * mean_q  # heavy penalty
                 done = True
