@@ -138,77 +138,68 @@ class MeshEnvironment(gym.Env):
         return np.array(state_components, dtype=np.float32)
     
     def _get_state(self):
-        """Create state representation from current boundary"""
+        """Create state representation from current boundary (vectorized)."""
         if len(self.boundary) < 3:
             return np.zeros(22, dtype=np.float32)
-        
-        # Select reference vertex
-        reference_vertex = self._select_reference_vertex()
+
+        # Use cached ref vertex if available (avoid redundant recomputation)
+        if hasattr(self, '_cached_ref_vertex') and self._cached_ref_vertex is not None:
+            reference_vertex = self._cached_ref_vertex
+        else:
+            reference_vertex = self._select_reference_vertex()
+
         ref_idx = -1
         for i, v in enumerate(self.boundary):
             if np.allclose(v, reference_vertex, atol=1e-10):
                 ref_idx = i
                 break
-        
         if ref_idx == -1:
             return np.zeros(22, dtype=np.float32)
-        
-        # Get surrounding vertices
-        surrounding_vertices = []
-        for i in range(1, self.n_rv + 1):
-            left_idx = (ref_idx - i) % len(self.boundary)
-            right_idx = (ref_idx + i) % len(self.boundary)
-            
-            surrounding_vertices.append(self.boundary[left_idx])
-            surrounding_vertices.append(self.boundary[right_idx])
-        
-        # Calculate fan-shaped area points
-        radius = self._calculate_fan_shape_radius(reference_vertex)
-        if radius < 1e-10:
-            radius = 1.0  # fallback to avoid division by zero
-        fan_points = self._get_fan_shape_points(reference_vertex, radius)
 
-        # Calculate remaining area ratio
+        # Gather surrounding vertices (vectorized index computation)
+        n_bnd = len(self.boundary)
+        indices = []
+        for i in range(1, self.n_rv + 1):
+            indices.append((ref_idx - i) % n_bnd)
+            indices.append((ref_idx + i) % n_bnd)
+        surrounding = self.boundary[indices]  # shape (2*n_rv, 2)
+
+        # Fan shape
+        if hasattr(self, '_cached_radius') and self._cached_radius is not None:
+            radius = self._cached_radius
+        else:
+            radius = self._calculate_fan_shape_radius(reference_vertex)
+        if radius < 1e-10:
+            radius = 1.0
+        fan_points = self._get_fan_shape_points(reference_vertex, radius)
+        fan_points = np.asarray(fan_points)  # shape (g, 2)
+
+        # Area ratio
         remaining_area = self._calculate_polygon_area(self.boundary)
         area_ratio = remaining_area / max(1e-10, self.original_area)
 
-        # Build state vector
-        state_components = []
+        # Vectorized: compute distances and angles for surrounding vertices
+        rel_surr = surrounding - reference_vertex  # (2*n_rv, 2)
+        dist_surr = np.linalg.norm(rel_surr, axis=1) / radius
+        angle_surr = np.arctan2(rel_surr[:, 1], rel_surr[:, 0]) / np.pi
+        flags_surr = np.zeros(len(surrounding))
+        surr_block = np.column_stack([dist_surr, angle_surr, flags_surr]).ravel()
 
-        # Process surrounding vertices
-        for vertex in surrounding_vertices:
-            rel_vector = vertex - reference_vertex
-            distance = np.linalg.norm(rel_vector)
-            angle = np.arctan2(rel_vector[1], rel_vector[0])
+        # Vectorized: compute distances and angles for fan points
+        rel_fan = fan_points - reference_vertex  # (g, 2)
+        dist_fan = np.linalg.norm(rel_fan, axis=1) / radius
+        angle_fan = np.arctan2(rel_fan[:, 1], rel_fan[:, 0]) / np.pi
+        flags_fan = np.ones(len(fan_points))
+        fan_block = np.column_stack([dist_fan, angle_fan, flags_fan]).ravel()
 
-            # Normalize and add to state
-            norm_distance = distance / radius
-            norm_angle = angle / np.pi
+        result = np.concatenate([surr_block, fan_block, [area_ratio]]).astype(np.float32)
 
-            state_components.extend([norm_distance, norm_angle, 0])
-
-        # Process fan-shaped area points
-        for point in fan_points:
-            rel_vector = point - reference_vertex
-            distance = np.linalg.norm(rel_vector)
-            angle = np.arctan2(rel_vector[1], rel_vector[0])
-
-            # Normalize and add to state
-            norm_distance = distance / radius
-            norm_angle = angle / np.pi
-
-            state_components.extend([norm_distance, norm_angle, 1])
-        
-        # Add area ratio
-        state_components.append(area_ratio)
-        
         # Ensure fixed length
-        result = np.array(state_components, dtype=np.float32)
         if len(result) < 22:
             result = np.pad(result, (0, 22 - len(result)))
         elif len(result) > 22:
             result = result[:22]
-            
+
         return result
     
     def _calculate_polygon_area(self, polygon):
@@ -917,6 +908,7 @@ class MeshEnvironment(gym.Env):
             return actions, mask
 
         radius = self._calculate_fan_shape_radius(ref_vertex)
+        self._cached_radius = radius  # cache for _get_state reuse
 
         # Compute angular range (same logic as _get_fan_shape_points)
         n_bnd = len(self.boundary)
@@ -976,40 +968,42 @@ class MeshEnvironment(gym.Env):
         return actions, mask
 
     def _get_enriched_state(self):
-        """Create enriched 44-float state representation."""
+        """Create enriched 44-float state representation (optimized)."""
         base_state = self._get_state()  # 22 floats
 
         # Boundary vertex count (normalized by initial count)
         boundary_count = len(self.boundary) / max(1, len(self.initial_boundary))
 
-        # Elements placed (normalized — assume max ~50 elements)
+        # Elements placed (normalized)
         elements_placed = len(self.elements) / max(1, len(self.initial_boundary) * 4)
 
-        # Num valid actions (normalized by max_actions=49)
+        # Num valid actions + action-type availability (from cache, no recompute)
         if hasattr(self, '_cached_actions') and self._cached_actions is not None:
             _, mask = self._cached_actions
             num_valid = np.sum(mask) / len(mask)
-        else:
-            num_valid = 0.0
-
-        # Boundary shape: 8 evenly-spaced samples, RELATIVE to reference vertex
-        boundary_samples = self._sample_boundary_points(8)
-        if len(self.boundary) >= 3:
-            ref = self._select_reference_vertex()
-            boundary_samples = boundary_samples - ref  # make reference-relative
-            # Normalize by fan radius for scale invariance
-            radius = self._calculate_fan_shape_radius(ref)
-            if radius > 1e-10:
-                boundary_samples = boundary_samples / radius
-
-        # Action-type availability: 2 booleans
-        if hasattr(self, '_cached_actions') and self._cached_actions is not None:
-            _, mask = self._cached_actions
             type0_valid = float(mask[0])
             type1_valid = float(np.any(mask[1:]))
         else:
+            num_valid = 0.0
             type0_valid = 0.0
             type1_valid = 0.0
+
+        # Boundary shape: 8 evenly-spaced samples, RELATIVE to cached ref vertex
+        boundary_samples = self._sample_boundary_points(8)
+        if len(self.boundary) >= 3:
+            # Use cached ref vertex and radius (avoid redundant recomputation)
+            if hasattr(self, '_cached_ref_vertex') and self._cached_ref_vertex is not None:
+                ref = self._cached_ref_vertex
+            else:
+                ref = self._select_reference_vertex()
+            boundary_samples = boundary_samples - ref
+
+            if hasattr(self, '_cached_radius') and self._cached_radius is not None:
+                radius = self._cached_radius
+            else:
+                radius = self._calculate_fan_shape_radius(ref)
+            if radius > 1e-10:
+                boundary_samples = boundary_samples / radius
 
         enriched = np.concatenate([
             base_state,                          # 22
@@ -1029,12 +1023,13 @@ class MeshEnvironment(gym.Env):
         return enriched
 
     def _sample_boundary_points(self, n_samples):
-        """Sample n evenly-spaced points along the boundary polygon."""
+        """Sample n evenly-spaced points along the boundary polygon (vectorized)."""
         if len(self.boundary) < 2:
             return np.zeros((n_samples, 2))
 
         # Compute cumulative edge lengths
-        edges = np.diff(np.vstack([self.boundary, self.boundary[0:1]]), axis=0)
+        closed = np.vstack([self.boundary, self.boundary[0:1]])
+        edges = np.diff(closed, axis=0)
         edge_lengths = np.linalg.norm(edges, axis=1)
         cum_lengths = np.concatenate([[0], np.cumsum(edge_lengths)])
         total_length = cum_lengths[-1]
@@ -1042,30 +1037,26 @@ class MeshEnvironment(gym.Env):
         if total_length < 1e-10:
             return np.zeros((n_samples, 2))
 
-        # Sample at evenly-spaced arc lengths
+        # Sample at evenly-spaced arc lengths — fully vectorized
         sample_lengths = np.linspace(0, total_length, n_samples, endpoint=False)
-        points = []
+        edge_indices = np.searchsorted(cum_lengths[1:], sample_lengths, side='right')
+        edge_indices = np.minimum(edge_indices, len(self.boundary) - 1)
 
-        for s in sample_lengths:
-            # Find which edge this sample falls on
-            edge_idx = np.searchsorted(cum_lengths[1:], s, side='right')
-            edge_idx = min(edge_idx, len(self.boundary) - 1)
+        local_s = sample_lengths - cum_lengths[edge_indices]
+        el = edge_lengths[edge_indices]
+        t = np.where(el > 1e-10, local_s / el, 0.0)
 
-            # Interpolate along that edge
-            local_s = s - cum_lengths[edge_idx]
-            edge_len = edge_lengths[edge_idx]
-            t = local_s / edge_len if edge_len > 1e-10 else 0.0
+        p1 = self.boundary[edge_indices]
+        p2 = self.boundary[(edge_indices + 1) % len(self.boundary)]
+        points = p1 + t[:, None] * (p2 - p1)
 
-            p1 = self.boundary[edge_idx]
-            p2 = self.boundary[(edge_idx + 1) % len(self.boundary)]
-            points.append(p1 + t * (p2 - p1))
-
-        return np.array(points)
+        return points
 
     def _invalidate_action_cache(self):
         """Clear the cached valid actions."""
         self._cached_actions = None
         self._cached_ref_vertex = None
+        self._cached_radius = None
 
     def plot_domain(self):
         """Plot the initial domain with interior points"""
