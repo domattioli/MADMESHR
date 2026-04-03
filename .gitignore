@@ -152,8 +152,7 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# MADMESHR outputs (regenerated, not tracked)
-output/latest/*.png
+# MADMESHR outputs
 checkpoints/
 
 # PyCharm

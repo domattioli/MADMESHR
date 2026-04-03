@@ -482,8 +482,9 @@ class MeshEnvironment(gym.Env):
                 if self._do_segments_intersect(edges[i][0], edges[i][1], edges[j][0], edges[j][1]):
                     return False
         
-        # Check orientation
-        return self._is_convex_quad(quad)
+        # Convexity no longer required — concave quads are valid but get lower
+        # quality scores naturally through the angle-based quality metric.
+        return True
     
     def _is_convex_quad(self, quad):
         """Check if quadrilateral is convex (accepts either consistent winding)."""
@@ -687,7 +688,8 @@ class MeshEnvironment(gym.Env):
         no_intersect &= ~self._batch_segments_intersect(
             quads[:, 1], quads[:, 2], quads[:, 3], quads[:, 0])
 
-        return convex & no_intersect
+        # Convexity no longer required — only reject self-intersecting quads
+        return no_intersect
 
     def _batch_segments_intersect(self, p1, p2, p3, p4):
         """Vectorized segment intersection test.

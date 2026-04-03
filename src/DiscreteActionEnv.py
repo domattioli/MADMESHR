@@ -128,15 +128,15 @@ class DiscreteActionEnv(gym.Wrapper):
                 done = True
         else:
             # Dense reward: quality-weighted + area progress + step penalty
-            reward = 2.0 * quality  # [0, 2] — quality signal (doubled)
+            reward = 0.3 * quality  # [0, 0.3] — quality signal (reduced from 2.0)
 
             # Area consumed this step (positive = good)
             prev_area = self._prev_area_ratio if self._prev_area_ratio is not None else 1.0
             area_consumed = prev_area - area_ratio
-            reward += 1.0 * area_consumed  # area progress (halved from 2.0)
+            reward += 1.0 * area_consumed  # area progress
 
             # Step penalty to encourage efficiency
-            reward -= 0.01
+            reward -= 0.05
 
         self._prev_area_ratio = area_ratio
         # Track boundary for info

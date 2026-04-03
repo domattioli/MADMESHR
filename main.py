@@ -27,33 +27,34 @@ from src.MeshEnvironment import MeshEnvironment
 DOMAINS = {}
 
 
-def register_domain(name, description):
+def register_domain(name, description, max_ep_len=20):
     """Decorator to register a domain factory function."""
     def decorator(fn):
         fn.description = description
+        fn.max_ep_len = max_ep_len
         DOMAINS[name] = fn
         return fn
     return decorator
 
 
-@register_domain("square", "4-vertex unit square (trivial, 1-step)")
+@register_domain("square", "4-vertex unit square (trivial, 1-step)", max_ep_len=5)
 def _make_square():
     return np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]], dtype=float)
 
 
-@register_domain("octagon", "8-vertex regular octagon")
+@register_domain("octagon", "8-vertex regular octagon", max_ep_len=10)
 def _make_octagon():
     angles = np.linspace(0, 2 * np.pi, 8, endpoint=False)
     return np.column_stack([np.cos(angles), np.sin(angles)])
 
 
-@register_domain("circle", "16-vertex circle approximation")
+@register_domain("circle", "16-vertex circle approximation", max_ep_len=15)
 def _make_circle():
     angles = np.linspace(0, 2 * np.pi, 16, endpoint=False)
     return np.column_stack([np.cos(angles), np.sin(angles)])
 
 
-@register_domain("star", "10-vertex star (alternating radii 1.0/0.4)")
+@register_domain("star", "10-vertex star (alternating radii 1.0/0.4)", max_ep_len=12)
 def _make_star():
     n = 10
     angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
@@ -61,7 +62,7 @@ def _make_star():
     return np.column_stack([radii * np.cos(angles), radii * np.sin(angles)])
 
 
-@register_domain("l-shape", "6-vertex L-shaped concave domain")
+@register_domain("l-shape", "6-vertex L-shaped concave domain", max_ep_len=10)
 def _make_l_shape():
     return np.array([
         [0.0, 0.0], [2.0, 0.0], [2.0, 1.0],
@@ -69,7 +70,7 @@ def _make_l_shape():
     ], dtype=float)
 
 
-@register_domain("rectangle", "20-vertex elongated rectangle (4:1 aspect)")
+@register_domain("rectangle", "20-vertex elongated rectangle (4:1 aspect)", max_ep_len=25)
 def _make_rectangle():
     bottom = [[x, 0.0] for x in np.linspace(0, 4, 9)]
     right = [[4.0, y] for y in np.linspace(0, 1, 3)[1:]]
@@ -225,10 +226,12 @@ def main():
             return
 
         replay_buffer = MaskedReplayBuffer(capacity=100_000)
+        domain_max_ep_len = DOMAINS[args.domain].max_ep_len
         trainer = DQNTrainer(
             env=discrete_env, agent=agent, replay_buffer=replay_buffer,
             total_timesteps=args.timesteps, batch_size=args.batch_size,
             eval_interval=args.eval_interval, save_dir=args.save_dir,
+            max_ep_len=domain_max_ep_len,
         )
 
         n_actions = discrete_env.max_actions
