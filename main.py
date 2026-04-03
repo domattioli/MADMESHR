@@ -15,6 +15,7 @@ Usage examples:
     python main.py --domain star --load-path checkpoints/star/best --eval-only
 """
 import argparse
+import os
 import numpy as np
 
 from src.MeshEnvironment import MeshEnvironment
@@ -173,6 +174,10 @@ def parse_args():
                         help='Training batch size (default: 64)')
     parser.add_argument('--eval-interval', type=int, default=5_000,
                         help='Evaluate every N steps (default: 5000)')
+    parser.add_argument('--warmup', type=int, default=5_000,
+                        help='Random warmup steps before training (default: 5000)')
+    parser.add_argument('--eval-every', type=int, default=None,
+                        help='Alias for --eval-interval')
 
     # Action space (DQN only)
     parser.add_argument('--n-angle', type=int, default=12,
@@ -195,6 +200,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Resolve eval-every alias
+    if args.eval_every is not None:
+        args.eval_interval = args.eval_every
 
     # Build domain
     boundary = DOMAINS[args.domain]()
@@ -255,12 +264,46 @@ def main():
         )
         replay_buffer = ReplayBuffer(capacity=100_000)
 
-        print(f"Training SAC | {args.timesteps} steps")
+        print(f"Training SAC | {args.timesteps} steps | warmup={args.warmup}")
         results = train_sac(
             env, agent, replay_buffer,
             total_timesteps=args.timesteps, batch_size=args.batch_size,
+            initial_random_steps=args.warmup,
             eval_interval=args.eval_interval,
         )
+
+        # Save training curves
+        os.makedirs("results", exist_ok=True)
+        from src.utils.visualization import plot_training_results, save_mesh_result
+        plot_training_results(results)
+        import shutil
+        if os.path.exists("training_results.png"):
+            shutil.move("training_results.png", "results/training_results.png")
+
+        # Run final evaluation episode and save mesh visualization
+        print("\nRunning final evaluation episode...")
+        eval_env = MeshEnvironment(initial_boundary=boundary)
+        state, _ = eval_env.reset()
+        ep_return = 0
+        for step in range(200):
+            action = agent.select_action(state)
+            state, reward, done, truncated, info = eval_env.step(action)
+            ep_return += reward
+            if done or truncated:
+                break
+
+        n_quads = sum(1 for e in eval_env.elements if len(e) == 4)
+        n_tris = sum(1 for e in eval_env.elements if len(e) == 3)
+        mean_q = np.mean(eval_env.element_qualities) if eval_env.element_qualities else 0
+        completed = done and info.get("complete", False)
+        print(f"Final eval: return={ep_return:.2f} | "
+              f"quality={mean_q:.3f} | "
+              f"elements={len(eval_env.elements)} ({n_quads}Q+{n_tris}T) | "
+              f"complete={completed}")
+
+        save_mesh_result(eval_env, f"{args.domain}_sac_final", output_dir="results")
+
+        # Post-processing disabled — focusing on Layers × FreeMeshRL algorithm.
 
     print("Training complete.")
 
