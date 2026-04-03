@@ -79,6 +79,12 @@ def _make_rectangle():
     return np.array(bottom + right + top + left, dtype=float)
 
 
+@register_domain("annulus-layer2", "64-vertex non-convex subdomain from CHILmesh annulus layer 2", max_ep_len=70)
+def _make_annulus_layer2():
+    import os
+    return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_layer2.npy"))
+
+
 # ---------------------------------------------------------------------------
 # SAC training (legacy)
 # ---------------------------------------------------------------------------
