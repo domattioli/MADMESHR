@@ -127,6 +127,28 @@ L-shape converged at ~2k steps but trained to 6k before being manually stopped. 
 
 5. **Element count correlates with domain complexity.** L-shape: 2Q, Octagon: 4Q, Star: 8Q. Makes geometric sense — star has 10 acute angles requiring more subdivisions.
 
+## Post-Session Analysis: Reward Drift from Pan et al.
+
+Comparing our active reward to Pan et al.'s (FreeMeshRL, Eq. 5-9) reveals we've drifted from the paper's formulation in two structurally important ways that explain the degenerate quads:
+
+**Pan et al. per-step reward:** `r = eta_e + eta_b + mu`
+- `eta_e` = element quality (0 to 1) — full weight, not scaled down
+- `eta_b` = boundary quality penalty (-1 to 0) — penalizes actions that leave sharp remaining angles on the boundary
+- `mu` = density penalty (-1 to 0) — penalizes elements below minimum area threshold; zero above max area; bounded negative
+- Completion: flat +10
+- Per-step range: roughly -2.2 to +1.0
+
+**Our active per-step reward:** `r = 0.3 * quality + area_consumed - 0.05`
+- quality signal (0 to 0.3) — scaled down to prevent farming
+- area_consumed (positive, variable per step)
+- step penalty
+
+**Problem 1: `area_consumed` inverts Pan's density incentive.** Pan's `mu` is a *bounded negative penalty* that discourages too-small elements. Our `area_consumed` is a *positive reward* that encourages covering area. This inverts the incentive structure: our agent is rewarded for big sloppy elements (high area consumed) while Pan's agent is only penalized for making elements too small. The farming fix reduced quality weight to 0.3x as a blunt countermeasure, but the root cause is that `area_consumed` as a positive reward is structurally wrong.
+
+**Problem 2: No boundary quality term (`eta_b`).** Pan's `eta_b` penalizes actions that create sharp remaining angles on the boundary — it's a forward-looking signal. Without it, our agent has zero incentive to preserve boundary quality for future steps. The 0.04-quality quad visible in the star mesh is a direct consequence: the agent takes a high-area action that leaves a terrible boundary configuration, and nothing penalizes that.
+
+**Implication:** The session 4 adversarial review was partially wrong. It concluded that the quality gap is purely geometric (action space limitation) and that reward tuning cannot help. This is true for the *ceiling* (max achievable quality) but not for the *gap between agent quality and ceiling*. Star agent quality is 0.314 vs ceiling 0.44 — a 29% gap. The agent is not even approaching the ceiling because it has no incentive to avoid boundary-destroying moves. Returning to Pan's reward structure could close much of this gap without changing the action space.
+
 ## Files Changed
 
 | File | Changes |
@@ -140,6 +162,6 @@ L-shape converged at ~2k steps but trained to 6k before being manually stopped. 
 
 ## Next Session Priority
 
-**Quality optimization.** Completion is solved across all tested domains. The agent consistently completes but doesn't optimize for element quality (star=0.314 vs ceiling=0.44, octagon=0.535 vs ceiling=0.61). The completion bonus dominates so heavily that quality signal is nearly irrelevant. Session 4 should focus on making quality matter once the mesh is complete.
+**Return to Pan et al.'s reward structure.** The reward function has drifted from the paper's formulation in structurally harmful ways: `area_consumed` as a positive reward inverts Pan's bounded density penalty, and the missing `eta_b` boundary quality term removes forward-looking incentives. Fixing these should close the quality gap (star 0.314 vs ceiling 0.44) without re-enabling farming, since Pan's formulation handles this natively through bounded penalties.
 
 See `doc/development_notes/session_4_plan.md`.
