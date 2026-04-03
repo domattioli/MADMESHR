@@ -1,0 +1,9 @@
+tensorflow>=2.21.0
+tensorflow-probability>=0.25.0
+numpy>=2.4.0
+gym>=0.26.2
+gymnasium>=1.2.0
+matplotlib>=3.10.0
+imageio>=2.37.0
+tqdm>=4.67.0
+pytest>=9.0.0

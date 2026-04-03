@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
@@ -155,3 +156,14 @@ class DQN:
             'loss': loss.numpy(),
             'mean_q': tf.reduce_mean(q_values).numpy(),
         }
+
+    def save_weights(self, path):
+        """Save online and target network weights to directory."""
+        os.makedirs(path, exist_ok=True)
+        self.online_net.save_weights(os.path.join(path, "online.weights.h5"))
+        self.target_net.save_weights(os.path.join(path, "target.weights.h5"))
+
+    def load_weights(self, path):
+        """Load online and target network weights from directory."""
+        self.online_net.load_weights(os.path.join(path, "online.weights.h5"))
+        self.target_net.load_weights(os.path.join(path, "target.weights.h5"))

@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from typing import Optional
 
@@ -19,7 +20,8 @@ class DQNTrainer:
                  max_ep_len: int = 100,
                  epsilon_start: float = 1.0,
                  epsilon_end: float = 0.05,
-                 epsilon_decay_frac: float = 0.7):
+                 epsilon_decay_frac: float = 0.7,
+                 save_dir: Optional[str] = None):
         self.env = env
         self.agent = agent
         self.replay_buffer = replay_buffer
@@ -29,6 +31,8 @@ class DQNTrainer:
         self.initial_random_steps = initial_random_steps
         self.eval_interval = eval_interval
         self.max_ep_len = max_ep_len
+        self.save_dir = save_dir
+        self.best_eval_return = -np.inf
 
         # Epsilon schedule: linear decay over first epsilon_decay_frac of training
         self.epsilon_start = epsilon_start
@@ -123,6 +127,17 @@ class DQNTrainer:
                 eval_return, eval_completion = self.evaluate()
                 self.results['completion_rates'].append(eval_completion)
                 print(f"  EVAL at t={t}: Return={eval_return:.2f} | Completion={eval_completion:.0%}")
+
+                if self.save_dir:
+                    self.agent.save_weights(os.path.join(self.save_dir, "latest"))
+                    if eval_return > self.best_eval_return:
+                        self.best_eval_return = eval_return
+                        self.agent.save_weights(os.path.join(self.save_dir, "best"))
+                        print(f"  Saved new best model (return={eval_return:.2f})")
+
+        if self.save_dir:
+            self.agent.save_weights(os.path.join(self.save_dir, "final"))
+            print(f"Saved final model to {self.save_dir}/final")
 
         return self.results
 

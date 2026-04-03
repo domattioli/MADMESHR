@@ -94,7 +94,7 @@ class DiscreteActionEnv(gym.Wrapper):
         if bnd_len < 3:
             # Boundary fully consumed — all quads, best possible outcome
             mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0
-            reward = 5.0 + 10.0 * mean_q  # highest reward tier
+            reward = 5.0 + 10.0 * mean_q ** 2  # quadratic: penalizes low quality smoothly
             done = True
         elif bnd_len == 3:
             # Triangle remainder at boundary — acceptable but penalized
@@ -111,7 +111,7 @@ class DiscreteActionEnv(gym.Wrapper):
                 self.env.elements.append(bnd_quad)
                 self.env.element_qualities.append(quality_final)
                 mean_q = np.mean(self.env.element_qualities)
-                reward = 5.0 + 10.0 * mean_q  # all-quad tier
+                reward = 5.0 + 10.0 * mean_q ** 2  # quadratic: penalizes low quality smoothly
                 done = True
             else:
                 # Self-intersecting quad → 2 triangles (worst outcome)
@@ -123,13 +123,13 @@ class DiscreteActionEnv(gym.Wrapper):
                 reward = 0.5 + 2.0 * mean_q  # heavy penalty
                 done = True
         else:
-            # Dense reward: quality + area progress + step penalty
-            reward = quality  # [0, 1] — direct quality signal
+            # Dense reward: quality-weighted + area progress + step penalty
+            reward = 2.0 * quality  # [0, 2] — quality signal (doubled)
 
             # Area consumed this step (positive = good)
             prev_area = self._prev_area_ratio if self._prev_area_ratio is not None else 1.0
             area_consumed = prev_area - area_ratio
-            reward += 2.0 * area_consumed  # scale up area progress
+            reward += 1.0 * area_consumed  # area progress (halved from 2.0)
 
             # Step penalty to encourage efficiency
             reward -= 0.01

@@ -100,6 +100,10 @@ def main():
                         help='Training batch size')
     parser.add_argument('--eval-interval', type=int, default=5_000,
                         help='Evaluation interval')
+    parser.add_argument('--save-dir', type=str, default=None,
+                        help='Directory to save model checkpoints (best, latest, final)')
+    parser.add_argument('--load-path', type=str, default=None,
+                        help='Path to load model weights from before training')
     args = parser.parse_args()
 
     env = MeshEnvironment()
@@ -119,7 +123,12 @@ def main():
             total_timesteps=args.timesteps,
             batch_size=args.batch_size,
             eval_interval=args.eval_interval,
+            save_dir=args.save_dir,
         )
+
+        if args.load_path:
+            agent.load_weights(args.load_path)
+            print(f"Loaded weights from {args.load_path}")
 
         print(f"Training DQN on {args.timesteps} timesteps...")
         print(f"Action space: Discrete({discrete_env.max_actions})")
