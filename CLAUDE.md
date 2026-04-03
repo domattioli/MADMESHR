@@ -64,8 +64,8 @@ main.py (CLI + domain registry)
 ### State Representation
 44-float enriched vector: boundary context (neighbor positions, angles) + fan-shape sample points + area ratio.
 
-### Reward Structure (Pan et al.)
-Per-step: `r = eta_e + eta_b + mu` where eta_e = element quality (0 to 1), eta_b = boundary angle penalty (-1 to 0), mu = density penalty (-1 to 0). Completion: flat +10. Quality metric is sqrt(q_edge * q_angle) (0-1 range). See `DiscreteActionEnv.step()` for implementation.
+### Reward Structure (Pan et al., modified)
+Per-step: `r = eta_e + 0.3 * eta_b + mu` where eta_e = element quality (0 to 1), eta_b = boundary angle penalty (-1 to 0, scaled by 0.3 to prevent step-minimization), mu = density penalty (-1 to 0). Completion: `5 + 10 * mean_q` (quality-gated, range 5-15). Quality metric is sqrt(q_edge * q_angle) (0-1 range). Reward components (eta_e, eta_b, mu, completion_bonus) are logged in info dict for diagnostics. See `DiscreteActionEnv.step()` for implementation.
 
 ## Key Patterns
 
@@ -91,7 +91,7 @@ All development sessions must follow the adversarial planning process documented
 
 ## Known Issues
 
-- Reward farming was fixed in session 3, and Pan et al. reward was implemented in session 4. Agent now uses very few elements (4 on star, 3 on octagon) but individual element quality is low (star=0.223). The eta_b boundary penalty may be driving the agent to minimize steps rather than place quality elements.
+- Session 5 scaled eta_b by 0.3 and added quality-gated completion bonus (5+10*mean_q). Star quality improved 0.223→0.371 (5Q). Octagon (0.478, 3Q), rectangle (0.464, 9Q), L-shape (0.459, 2Q) stable.
 - Quality ceiling is geometry-limited (star≈0.44, circle≈0.78, octagon≈0.61), not discretization-limited.
 - SAC agent (`src/SAC.py`, `src/trainer.py`) is legacy and does not learn effectively — DQN is the active approach.
-- Rectangle (20v) scales: 100% completion with 9 elements, quality=0.464.
+- Octagon quality (0.478) still below 0.50 target and 0.61 ceiling — room for improvement.

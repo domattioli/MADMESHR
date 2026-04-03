@@ -61,6 +61,7 @@ class DQNTrainer:
         mask = info["action_mask"]
         episode_return, episode_length = 0.0, 0
         completions, episodes = 0, 0
+        ep_eta_e, ep_eta_b, ep_mu, ep_bonus = 0.0, 0.0, 0.0, 0.0
 
         for t in range(1, self.total_timesteps + 1):
             epsilon = self._get_epsilon(t)
@@ -81,6 +82,10 @@ class DQNTrainer:
 
             episode_return += reward
             episode_length += 1
+            ep_eta_e += info.get("eta_e", 0.0)
+            ep_eta_b += info.get("eta_b", 0.0)
+            ep_mu += info.get("mu", 0.0)
+            ep_bonus += info.get("completion_bonus", 0.0)
 
             # Mark terminal: either env signals done/truncated, or we hit max_ep_len
             is_terminal = done or truncated or (episode_length >= self.max_ep_len)
@@ -106,11 +111,13 @@ class DQNTrainer:
                     print(f"t={t} | Return: {episode_return:.2f} | "
                           f"Elements: {len(self.env.env.elements)} | "
                           f"Eps: {epsilon:.3f} | "
-                          f"Completions: {completions}/{episodes}")
+                          f"Completions: {completions}/{episodes} | "
+                          f"EtaE: {ep_eta_e:.2f} EtaB: {ep_eta_b:.2f} Mu: {ep_mu:.2f} Bonus: {ep_bonus:.1f}")
 
                 state, info = self.env.reset()
                 mask = info["action_mask"]
                 episode_return, episode_length = 0.0, 0
+                ep_eta_e, ep_eta_b, ep_mu, ep_bonus = 0.0, 0.0, 0.0, 0.0
 
             # Train
             if self.replay_buffer.size() >= self.batch_size and t >= self.initial_random_steps:
@@ -124,9 +131,9 @@ class DQNTrainer:
 
             # Evaluate
             if t % self.eval_interval == 0:
+                self._eval_t = t
                 eval_return, eval_completion = self.evaluate()
                 self.results['completion_rates'].append(eval_completion)
-                print(f"  EVAL at t={t}: Return={eval_return:.2f} | Completion={eval_completion:.0%}")
 
                 if self.save_dir:
                     self.agent.save_weights(os.path.join(self.save_dir, "latest"))
@@ -145,11 +152,15 @@ class DQNTrainer:
         """Deterministic evaluation (epsilon=0)."""
         returns = []
         completions = 0
+        all_qualities = []
+        all_elements = []
+        all_eta_b = []
 
         for _ in range(num_episodes):
             state, info = self.env.reset()
             mask = info["action_mask"]
             ep_return, ep_len = 0.0, 0
+            ep_eta_b_sum = 0.0
             done = False
 
             while not done and ep_len < self.max_ep_len:
@@ -160,11 +171,23 @@ class DQNTrainer:
                 mask = info["action_mask"]
                 ep_return += reward
                 ep_len += 1
+                ep_eta_b_sum += info.get("eta_b", 0.0)
                 if truncated:
                     break
 
             if done and info.get("complete", False):
                 completions += 1
             returns.append(ep_return)
+            mean_q = np.mean(self.env.env.element_qualities) if self.env.env.element_qualities else 0
+            all_qualities.append(mean_q)
+            all_elements.append(len(self.env.env.elements))
+            all_eta_b.append(ep_eta_b_sum)
+
+        avg_q = np.mean(all_qualities)
+        avg_elem = np.mean(all_elements)
+        avg_eta_b = np.mean(all_eta_b)
+        print(f"  EVAL at t={self._eval_t}: Return={np.mean(returns):.2f} | "
+              f"Completion={completions / num_episodes:.0%} | "
+              f"MeanQ={avg_q:.3f} | AvgElements={avg_elem:.1f} | AvgEtaB={avg_eta_b:.2f}")
 
         return np.mean(returns), completions / num_episodes

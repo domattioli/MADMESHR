@@ -90,10 +90,12 @@ class DiscreteActionEnv(gym.Wrapper):
         area_ratio = remaining_area / max(1e-10, self.env.original_area)
 
         done = False
+        eta_e, eta_b, mu = 0.0, 0.0, 0.0
         bnd_len = len(self.env.boundary)
         if bnd_len < 3:
             # Boundary fully consumed — all quads, best possible outcome
-            reward = 10.0  # flat completion bonus (Pan et al.)
+            mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0.0
+            reward = 5.0 + 10.0 * mean_q  # quality-gated completion bonus
             done = True
         elif bnd_len == 3:
             # Triangle remainder — check if boundary or interior
@@ -101,8 +103,9 @@ class DiscreteActionEnv(gym.Wrapper):
             self.env.elements.append(tri)
             self.env.element_qualities.append(0.3)
             self.env.boundary = np.empty((0, 2))
+            mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0.0
             if self.env.is_boundary_triangle(tri):
-                reward = 6.0  # boundary triangle: reduced completion bonus
+                reward = 5.0 + 10.0 * mean_q  # boundary triangle: quality-gated
             else:
                 reward = 3.0  # interior triangle: heavy penalty
             done = True
@@ -114,7 +117,8 @@ class DiscreteActionEnv(gym.Wrapper):
                 self.env.elements.append(bnd_quad)
                 self.env.element_qualities.append(quality_final)
                 self.env.boundary = np.empty((0, 2))
-                reward = 10.0  # flat completion bonus (Pan et al.)
+                mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0.0
+                reward = 5.0 + 10.0 * mean_q  # quality-gated completion bonus
                 done = True
             else:
                 # Self-intersecting quad → 2 triangles (worst outcome)
@@ -148,7 +152,7 @@ class DiscreteActionEnv(gym.Wrapper):
             else:
                 mu = 0.0
 
-            reward = eta_e + eta_b + mu
+            reward = eta_e + 0.3 * eta_b + mu
 
         self._prev_area_ratio = area_ratio
         # Track boundary for info
@@ -174,6 +178,10 @@ class DiscreteActionEnv(gym.Wrapper):
             "action_mask": self._action_mask.copy(),
             "complete": done,
             "element_quality": quality,
+            "eta_e": eta_e if not done else 0.0,
+            "eta_b": eta_b if not done else 0.0,
+            "mu": mu if not done else 0.0,
+            "completion_bonus": reward if done else 0.0,
         }
 
         return enriched, reward, done, truncated, info
