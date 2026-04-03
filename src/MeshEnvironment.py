@@ -31,6 +31,13 @@ class MeshEnvironment(gym.Env):
         self.elements = []
         self.element_qualities = []
         self.original_area = self._calculate_polygon_area(self.initial_boundary)
+
+        # Store original boundary edges for triangle classification
+        self._original_boundary_segments = []
+        for i in range(len(self.initial_boundary)):
+            p1 = self.initial_boundary[i]
+            p2 = self.initial_boundary[(i + 1) % len(self.initial_boundary)]
+            self._original_boundary_segments.append((p1.copy(), p2.copy()))
         
         # Parameters
         self.n_rv = 2
@@ -562,6 +569,51 @@ class MeshEnvironment(gym.Env):
                 inside = not inside
             j = i
         return inside
+
+    def _is_edge_on_original_boundary(self, p1, p2, atol=1e-8):
+        """Check if edge (p1, p2) lies on any original boundary segment.
+
+        Tests whether both endpoints lie on the same original boundary segment
+        (collinear and contained). This handles cases where original edges have
+        been split by element placement.
+        """
+        p1 = np.asarray(p1, dtype=float)
+        p2 = np.asarray(p2, dtype=float)
+
+        for seg_start, seg_end in self._original_boundary_segments:
+            seg_vec = seg_end - seg_start
+            seg_len_sq = np.dot(seg_vec, seg_vec)
+            if seg_len_sq < atol * atol:
+                continue
+
+            # Project both points onto the segment line
+            t1 = np.dot(p1 - seg_start, seg_vec) / seg_len_sq
+            t2 = np.dot(p2 - seg_start, seg_vec) / seg_len_sq
+
+            # Check both points are within the segment (0 <= t <= 1)
+            if t1 < -atol or t1 > 1 + atol or t2 < -atol or t2 > 1 + atol:
+                continue
+
+            # Check both points are close to the segment line (perpendicular distance)
+            proj1 = seg_start + t1 * seg_vec
+            proj2 = seg_start + t2 * seg_vec
+            dist1 = np.linalg.norm(p1 - proj1)
+            dist2 = np.linalg.norm(p2 - proj2)
+
+            if dist1 < atol and dist2 < atol:
+                return True
+
+        return False
+
+    def is_boundary_triangle(self, triangle):
+        """Check if a triangle has at least one edge on the original domain boundary."""
+        tri = np.asarray(triangle)
+        for i in range(len(tri)):
+            p1 = tri[i]
+            p2 = tri[(i + 1) % len(tri)]
+            if self._is_edge_on_original_boundary(p1, p2):
+                return True
+        return False
 
     def _batch_point_in_polygon(self, points, polygon):
         """Vectorized ray-casting test for multiple points against one polygon.

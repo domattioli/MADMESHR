@@ -97,11 +97,15 @@ class DiscreteActionEnv(gym.Wrapper):
             reward = 5.0 + 10.0 * mean_q ** 2  # quadratic: penalizes low quality smoothly
             done = True
         elif bnd_len == 3:
-            # Triangle remainder at boundary — acceptable but penalized
-            self.env.elements.append(np.array(self.env.boundary))
+            # Triangle remainder — check if boundary or interior
+            tri = np.array(self.env.boundary)
+            self.env.elements.append(tri)
             self.env.element_qualities.append(0.3)
             mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0
-            reward = 2.0 + 4.0 * mean_q  # moderate penalty vs all-quad
+            if self.env.is_boundary_triangle(tri):
+                reward = 2.0 + 4.0 * mean_q  # boundary triangle: moderate penalty
+            else:
+                reward = 0.5 + 1.0 * mean_q  # interior triangle: heavy penalty
             done = True
         elif bnd_len == 4:
             bnd_quad = np.array(self.env.boundary)
