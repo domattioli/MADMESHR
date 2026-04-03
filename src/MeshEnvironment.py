@@ -274,28 +274,33 @@ class MeshEnvironment(gym.Env):
         return quality
     
     def _calculate_reward(self, new_element, element_quality, area_ratio):
-        """Calculate reward (Equations 5-9 in Pan et al.)"""
-        # Element quality component
-        eta_e = element_quality
-        
+        """Calculate reward (Equations 5-9 in Pan et al., with quality emphasis)"""
+        # Element quality component — amplified to incentivize better quads
+        eta_e = 2.0 * element_quality
+
         # Boundary quality component (simplified)
         eta_b = -0.2
-        
+
         # Density component
         element_area = self._calculate_polygon_area(new_element)
         A_min = 0.01 * self.original_area
         A_max = 0.1 * self.original_area
-        
+
         if element_area < A_min:
             mu = -1
         elif element_area < A_max:
             mu = (element_area - A_min) / (A_max - A_min)
         else:
             mu = 0
-            
+
+        # Aspect ratio penalty: penalize very elongated quads
+        edges = [np.linalg.norm(new_element[(i+1) % 4] - new_element[i]) for i in range(4)]
+        aspect = max(edges) / max(min(edges), 1e-10)
+        aspect_penalty = -0.5 * max(0, aspect - 3.0)  # Penalty kicks in above 3:1 ratio
+
         # Overall reward
-        reward = eta_e + eta_b + mu
-        
+        reward = eta_e + eta_b + mu + aspect_penalty
+
         return reward
     
     def _select_reference_vertex(self):

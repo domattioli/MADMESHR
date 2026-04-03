@@ -17,7 +17,7 @@ class DQNTrainer:
                  batch_size: int = 64,
                  initial_random_steps: int = 1_000,
                  eval_interval: int = 5_000,
-                 max_ep_len: int = 100,
+                 max_ep_len: int = 200,
                  epsilon_start: float = 1.0,
                  epsilon_end: float = 0.05,
                  epsilon_decay_frac: float = 0.7,
