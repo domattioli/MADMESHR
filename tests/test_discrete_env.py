@@ -358,5 +358,61 @@ class TestDQN:
         assert dones.shape == (5,)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: Type-2 actions (proximity-based quad formation)
+# ---------------------------------------------------------------------------
+
+class TestType2Actions:
+    """Tests for type-2 proximity-based quad formation."""
+
+    def _make_annulus_env(self):
+        bnd = np.load(os.path.join(os.path.dirname(__file__), '..', 'domains', 'annulus_layer2.npy'))
+        return MeshEnvironment(initial_boundary=bnd)
+
+    def test_proximity_finds_at_least_5_pairs(self):
+        """Annulus should have >= 5 proximity pairs with threshold=0.02."""
+        env = self._make_annulus_env()
+        env.reset()
+        all_pairs = set()
+        for i in range(len(env.boundary)):
+            for far_idx, dist in env._find_proximity_pairs(i, threshold=0.02, min_gap=3):
+                all_pairs.add((min(i, far_idx), max(i, far_idx)))
+        assert len(all_pairs) >= 5, f"Expected >= 5 pairs, got {len(all_pairs)}"
+
+    def test_type2_forms_at_least_one_valid_quad(self):
+        """At least one coincident pair should produce a valid type-2 quad."""
+        env = self._make_annulus_env()
+        env.reset()
+        valid_count = 0
+        for i in range(len(env.boundary)):
+            for far_idx, dist in env._find_proximity_pairs(i, threshold=0.02, min_gap=3):
+                elem, consumed = env._form_type2_element(i, far_idx)
+                if elem is not None:
+                    valid_count += 1
+        assert valid_count >= 1, "Expected at least 1 valid type-2 quad"
+
+    def test_boundary_update_preserves_single_loop(self):
+        """After type-2 boundary update, boundary should be a valid single loop."""
+        env = self._make_annulus_env()
+        env.reset()
+        orig_len = len(env.boundary)
+
+        # Find first valid type-2 action
+        for i in range(len(env.boundary)):
+            for far_idx, _ in env._find_proximity_pairs(i, threshold=0.02, min_gap=3):
+                elem, consumed = env._form_type2_element(i, far_idx)
+                if elem is not None:
+                    env.elements.append(elem)
+                    env.element_qualities.append(env._calculate_element_quality(elem))
+                    ok = env._update_boundary_type2(elem, i, far_idx, consumed)
+                    assert ok, "Boundary update should succeed"
+                    assert len(env.boundary) < orig_len, "Boundary should shrink"
+                    area = env._calculate_polygon_area(env.boundary)
+                    assert area > 0, "Boundary should have positive area"
+                    return
+
+        pytest.fail("No valid type-2 action found to test boundary update")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

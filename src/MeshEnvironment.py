@@ -1085,6 +1085,215 @@ class MeshEnvironment(gym.Env):
 
         return points
 
+    def _find_proximity_pairs(self, ref_idx, threshold=0.02, min_gap=3):
+        """Find non-adjacent boundary vertices within distance threshold of ref vertex.
+
+        Args:
+            ref_idx: Index of reference vertex in boundary.
+            threshold: Maximum Euclidean distance to consider.
+            min_gap: Minimum boundary gap (forward or backward) to exclude adjacent vertices.
+
+        Returns:
+            List of (far_idx, distance) tuples sorted by distance.
+        """
+        n = len(self.boundary)
+        if n < 2 * min_gap:
+            return []
+
+        ref_vertex = self.boundary[ref_idx]
+        dists = np.linalg.norm(self.boundary - ref_vertex, axis=1)
+
+        # Compute boundary gap: min of forward and backward distance in loop
+        indices = np.arange(n)
+        forward_gap = (indices - ref_idx) % n
+        backward_gap = (ref_idx - indices) % n
+        gap = np.minimum(forward_gap, backward_gap)
+
+        # Filter: within threshold AND non-adjacent
+        valid = (dists < threshold) & (gap >= min_gap)
+
+        far_indices = np.where(valid)[0]
+        pairs = [(int(idx), float(dists[idx])) for idx in far_indices]
+        pairs.sort(key=lambda x: x[1])
+        return pairs
+
+    def _form_type2_element(self, ref_idx, far_idx):
+        """Form a type-2 quad element connecting two non-adjacent boundary segments.
+
+        For coincident/near-coincident vertex pairs (the primary use case), the quad
+        is formed from the 4 neighbor vertices surrounding the pair, since including
+        both coincident vertices would create a degenerate quad.
+
+        Tries multiple orientations and returns the first valid quad.
+
+        Returns:
+            (element, consumed_indices) if valid, or (None, None).
+            consumed_indices is the set of boundary indices consumed (including
+            the coincident pair and their used neighbors).
+        """
+        n = len(self.boundary)
+        ref_prev = (ref_idx - 1) % n
+        ref_next = (ref_idx + 1) % n
+        far_prev = (far_idx - 1) % n
+        far_next = (far_idx + 1) % n
+
+        dist = np.linalg.norm(self.boundary[ref_idx] - self.boundary[far_idx])
+
+        if dist < 1e-6:
+            # Coincident pair: form quad from 4 neighbors, consume pair + neighbors
+            consumed = {ref_prev, ref_idx, ref_next, far_prev, far_idx, far_next}
+
+            for quad in [
+                np.array([self.boundary[ref_prev], self.boundary[ref_next],
+                          self.boundary[far_next], self.boundary[far_prev]]),
+                np.array([self.boundary[ref_prev], self.boundary[ref_next],
+                          self.boundary[far_prev], self.boundary[far_next]]),
+            ]:
+                if not self._is_valid_quad(quad):
+                    continue
+                if self._calculate_polygon_area(quad) < 1e-12:
+                    continue
+                if self._type2_crosses_boundary(quad, consumed):
+                    continue
+                # Reject if centroid is outside the domain
+                centroid = np.mean(quad, axis=0)
+                if not self._point_in_polygon(centroid, self.boundary):
+                    continue
+                return quad, consumed
+
+        else:
+            # Non-coincident pair: original approach
+            v_ref = self.boundary[ref_idx]
+            v_ref_next = self.boundary[ref_next]
+            v_far = self.boundary[far_idx]
+
+            for quad, cons in [
+                (np.array([v_ref, v_ref_next, v_far, self.boundary[far_prev]]),
+                 {ref_idx, ref_next, far_idx, far_prev}),
+                (np.array([v_ref, v_ref_next, v_far, self.boundary[far_next]]),
+                 {ref_idx, ref_next, far_idx, far_next}),
+            ]:
+                if not self._is_valid_quad(quad):
+                    continue
+                if self._calculate_polygon_area(quad) < 1e-12:
+                    continue
+                if self._type2_crosses_boundary(quad, cons):
+                    continue
+                centroid = np.mean(quad, axis=0)
+                if not self._point_in_polygon(centroid, self.boundary):
+                    continue
+                return quad, cons
+
+        return None, None
+
+    def _type2_crosses_boundary(self, quad, consumed):
+        """Check if a type-2 quad's edges cross any non-consumed boundary edge.
+
+        A boundary edge (i, i+1) is 'consumed' if both endpoints are in the
+        consumed set. Non-consumed edges must not be crossed by quad edges.
+        """
+        n = len(self.boundary)
+        quad_edges = [(quad[i], quad[(i + 1) % 4]) for i in range(4)]
+
+        for i in range(n):
+            j = (i + 1) % n
+            # Skip edges where both vertices are consumed (part of the quad)
+            if i in consumed and j in consumed:
+                continue
+            bp1 = self.boundary[i]
+            bp2 = self.boundary[j]
+            for qe in quad_edges:
+                # Skip if quad edge shares an endpoint with boundary edge
+                if (np.linalg.norm(qe[0] - bp1) < 1e-8 or
+                    np.linalg.norm(qe[0] - bp2) < 1e-8 or
+                    np.linalg.norm(qe[1] - bp1) < 1e-8 or
+                    np.linalg.norm(qe[1] - bp2) < 1e-8):
+                    continue
+                if self._do_segments_intersect(qe[0], qe[1], bp1, bp2):
+                    return True
+        return False
+
+    def _update_boundary_type2(self, element, ref_idx, far_idx, consumed):
+        """Update boundary after a type-2 element consumes non-contiguous vertices.
+
+        A type-2 quad consumes vertices from two separate locations on the boundary.
+        The consumed set may be 4 vertices (non-coincident) or 6 vertices (coincident
+        pair + their 4 neighbors). The surviving vertices form two arcs that are
+        reconnected into a single loop.
+
+        Args:
+            element: (4, 2) array of quad vertices.
+            ref_idx: Index of reference vertex in boundary.
+            far_idx: Index of far vertex in boundary.
+            consumed: Set of boundary indices consumed by the element.
+
+        Returns:
+            True if boundary was successfully updated, False otherwise.
+        """
+        n = len(self.boundary)
+        consumed_set = set(consumed)
+
+        # Find the two contiguous consumed segments by walking the boundary.
+        # A segment is a maximal contiguous run of consumed indices.
+        segments = []
+        visited = set()
+        for start_candidate in sorted(consumed_set):
+            if start_candidate in visited:
+                continue
+            # Find the start of this contiguous run (walk backward)
+            s = start_candidate
+            while (s - 1) % n in consumed_set and (s - 1) % n not in visited:
+                s = (s - 1) % n
+            # Walk forward to find the full segment
+            seg = []
+            idx = s
+            while idx in consumed_set and idx not in visited:
+                seg.append(idx)
+                visited.add(idx)
+                idx = (idx + 1) % n
+            if seg:
+                segments.append(seg)
+
+        if len(segments) != 2:
+            return False
+
+        seg1, seg2 = segments[0], segments[1]
+
+        # Arc 1: from end of seg1+1 to start of seg2-1 (walking forward)
+        arc1 = []
+        idx = (seg1[-1] + 1) % n
+        while idx != seg2[0]:
+            arc1.append(idx)
+            idx = (idx + 1) % n
+
+        # Arc 2: from end of seg2+1 to start of seg1-1 (walking forward)
+        arc2 = []
+        idx = (seg2[-1] + 1) % n
+        while idx != seg1[0]:
+            arc2.append(idx)
+            idx = (idx + 1) % n
+
+        new_boundary_indices = arc1 + arc2
+
+        if len(new_boundary_indices) == 0:
+            self.boundary = np.empty((0, 2))
+            return True
+
+        new_boundary = self.boundary[new_boundary_indices]
+
+        # Verify winding: should have positive area (CCW)
+        area = self._calculate_polygon_area(new_boundary)
+        if area < 1e-14:
+            # Try reversed arc ordering
+            new_boundary_indices = arc2 + arc1
+            new_boundary = self.boundary[new_boundary_indices]
+            area = self._calculate_polygon_area(new_boundary)
+            if area < 1e-14:
+                return False
+
+        self.boundary = new_boundary
+        return True
+
     def _invalidate_action_cache(self):
         """Clear the cached valid actions."""
         self._cached_actions = None

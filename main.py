@@ -197,6 +197,10 @@ def parse_args():
     parser.add_argument('--eval-only', action='store_true',
                         help='Skip training, just evaluate loaded model')
 
+    # Epsilon schedule (DQN only)
+    parser.add_argument('--epsilon-decay-frac', type=float, default=0.7,
+                        help='Fraction of training over which epsilon decays (default: 0.7)')
+
     # Greedy baseline
     parser.add_argument('--greedy', action='store_true',
                         help='Run greedy-by-quality rollout (no training)')
@@ -311,6 +315,7 @@ def main():
             total_timesteps=args.timesteps, batch_size=args.batch_size,
             eval_interval=args.eval_interval, save_dir=args.save_dir,
             max_ep_len=domain_max_ep_len,
+            epsilon_decay_frac=args.epsilon_decay_frac,
         )
 
         n_actions = discrete_env.max_actions
