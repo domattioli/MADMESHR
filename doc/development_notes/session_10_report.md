@@ -119,16 +119,39 @@ The multi-loop support works but the oracle gets stuck at 21 boundary vertices o
 | `output/latest/h-shape_greedy.png` | Greedy baseline |
 | `output/latest/annulus_layer2_oracle_type2.png` | Updated oracle visualization |
 
+## Critical Discovery: Elements Extend Outside Concave Domains
+
+Post-training inspection of the H-shape mesh revealed that **elements extend outside the domain boundary on concave domains.** The 7Q DQN mesh has quads whose edges shortcut across the H-shape's rectangular cutouts — areas that are NOT part of the domain. This also affects the L-shape and star domains.
+
+**Root cause:** The current validity checks (self-intersection, centroid-in-polygon, positive area) are insufficient for concave domains. A quad can pass all checks yet have edges that cross through exterior concavities.
+
+**Multi-agent design review:** Three specialized agents (Robustness Planner, Minimalist Critic, Computational Optimizer) collaboratively designed and debated the fix over 3 rounds of iteration, converging on 4 new checks:
+
+1. **Element edges vs original boundary** (in enumerate, vectorized) — catches the primary concave-shortcut failure. No quad edge may cross any segment of `initial_boundary`.
+2. **Element edges vs current boundary, non-consumed** (in enumerate, vectorized) — catches elements crossing interior edges from previously placed elements.
+3. **Post-update boundary self-intersection** (in step, rollback) — catches boundary update bugs producing corrupt polygon state.
+4. **Element overlap with existing elements** (in step, rollback) — catches overlapping mesh regions.
+
+Key design decisions from the debate:
+- Checks go in **enumerate** (mask invalid actions) not step (penalty after selection) — consistent with existing architecture, prevents wasted training steps
+- Vertex PIP prefilter **dropped** — redundant with edge-crossing check per Jordan Curve Theorem
+- Edge midpoint sampling **dropped** — mathematically redundant: if endpoints are inside and edges don't cross boundary, entire edge is inside
+- Boundary self-intersection kept in **production** (not debug-only) — documented history of boundary update bugs justifies runtime validation
+
+**This is the session 11 priority.** Type-2 DQN integration is deferred to session 12.
+
 ## Short-term Next Steps (Session 11)
 
-1. **Type-2 DQN integration.** Add type-2 actions to DiscreteActionEnv action space — the architecture is now ready (multi-loop support works). This is the key step to let DQN use type-2 actions during training.
+1. **Concave domain validity fix.** Implement the 4-check plan above. This blocks ALL concave-domain training (H-shape, L-shape, star).
 
-2. **Improve type-2 coverage on annulus.** Increase proximity threshold beyond coincident-only. Try non-coincident pairs at threshold=0.1-0.5. May need relaxed centroid check for wider pairs.
+2. **Re-run H-shape and L-shape training** after fix to get valid meshes.
 
-3. **H-shape quality improvement.** The 0.362 quality is below other domains. Try 30k steps, or add vertex refinement to the action space that targets the concave corners.
+3. **7-point validation on all domains** to confirm no existing domain has hidden out-of-domain elements.
 
 ## Medium-term Next Steps (Sessions 12-13)
 
-4. **Pan et al. validation.** Recreate one of their test domains to validate the advancing-front + reward formulation.
+4. **Type-2 DQN integration.** Add type-2 actions to DiscreteActionEnv action space (deferred from session 11 plan).
 
-5. **Multi-domain training.** Single agent on all domains simultaneously to improve generalization.
+5. **Improve type-2 coverage on annulus.** Increase proximity threshold, relax centroid check.
+
+6. **Pan et al. validation.** Recreate test domains.
