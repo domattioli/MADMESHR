@@ -59,6 +59,7 @@ class MeshEnvironment(gym.Env):
         
         # Action cache
         self._cached_actions = None
+        self._cached_ref_idx = None
 
         # Reset the environment
         self.reset()
@@ -71,6 +72,31 @@ class MeshEnvironment(gym.Env):
         self._invalidate_action_cache()
         state = self._get_state()
         return state, {}
+
+    def _find_vertex_index(self, vertex):
+        """Find index of vertex in boundary using vectorized distance (replaces allclose loop)."""
+        if len(self.boundary) == 0:
+            return -1
+        dists = np.sum((self.boundary - vertex) ** 2, axis=1)
+        idx = np.argmin(dists)
+        if dists[idx] < 1e-18:  # atol=1e-10 squared ≈ 1e-20, use 1e-18 for safety
+            return int(idx)
+        return -1
+
+    def _find_vertex_indices(self, vertices):
+        """Find indices of multiple vertices in boundary (vectorized).
+
+        Returns array of indices, -1 for not found.
+        """
+        if len(self.boundary) == 0 or len(vertices) == 0:
+            return np.full(len(vertices), -1, dtype=int)
+        # Compute distance matrix: (n_vertices, n_boundary)
+        diff = vertices[:, np.newaxis, :] - self.boundary[np.newaxis, :, :]  # (V, B, 2)
+        dists = np.sum(diff ** 2, axis=2)  # (V, B)
+        indices = np.argmin(dists, axis=1)
+        min_dists = dists[np.arange(len(vertices)), indices]
+        indices[min_dists >= 1e-18] = -1
+        return indices
     
     def step(self, action):
         self._invalidate_action_cache()
@@ -142,17 +168,15 @@ class MeshEnvironment(gym.Env):
         if len(self.boundary) < 3:
             return np.zeros(22, dtype=np.float32)
 
-        # Use cached ref vertex if available (avoid redundant recomputation)
+        # Use cached ref vertex/index if available (avoid redundant recomputation)
         if hasattr(self, '_cached_ref_vertex') and self._cached_ref_vertex is not None:
             reference_vertex = self._cached_ref_vertex
+            ref_idx = getattr(self, '_cached_ref_idx', None)
+            if ref_idx is None or ref_idx == -1:
+                ref_idx = self._find_vertex_index(reference_vertex)
         else:
             reference_vertex = self._select_reference_vertex()
-
-        ref_idx = -1
-        for i, v in enumerate(self.boundary):
-            if np.allclose(v, reference_vertex, atol=1e-10):
-                ref_idx = i
-                break
+            ref_idx = self._find_vertex_index(reference_vertex)
         if ref_idx == -1:
             return np.zeros(22, dtype=np.float32)
 
@@ -328,13 +352,8 @@ class MeshEnvironment(gym.Env):
         """Calculate radius for fan-shaped area"""
         if len(self.boundary) < 3:
             return 0.5
-        
-        ref_idx = -1
-        for i, v in enumerate(self.boundary):
-            if np.allclose(v, reference_vertex, atol=1e-10):
-                ref_idx = i
-                break
-        
+
+        ref_idx = self._find_vertex_index(reference_vertex)
         if ref_idx == -1:
             return 0.5
         
@@ -357,11 +376,10 @@ class MeshEnvironment(gym.Env):
         
         # Find reference vertex in boundary
         left_idx, right_idx = -1, -1
-        for i, v in enumerate(self.boundary):
-            if np.allclose(v, reference_vertex, atol=1e-10):
-                left_idx = (i - 1) % len(self.boundary)
-                right_idx = (i + 1) % len(self.boundary)
-                break
+        ref_idx = self._find_vertex_index(reference_vertex)
+        if ref_idx != -1:
+            left_idx = (ref_idx - 1) % len(self.boundary)
+            right_idx = (ref_idx + 1) % len(self.boundary)
         
         if left_idx == -1:
             angles = np.linspace(0, 2*np.pi, self.g+1)[:-1]
@@ -416,12 +434,7 @@ class MeshEnvironment(gym.Env):
     
     def _form_element(self, reference_vertex, action_type, new_vertex):
         """Form a quadrilateral element based on action type"""
-        ref_idx = -1
-        for i, v in enumerate(self.boundary):
-            if np.allclose(v, reference_vertex, atol=1e-10):
-                ref_idx = i
-                break
-
+        ref_idx = self._find_vertex_index(reference_vertex)
         return self._form_element_fast(reference_vertex, action_type, new_vertex, ref_idx)
 
     def _form_element_fast(self, reference_vertex, action_type, new_vertex, ref_idx):
@@ -602,27 +615,24 @@ class MeshEnvironment(gym.Env):
 
         Used for eta_b (boundary quality penalty) in Pan et al.'s reward.
         Returns 180.0 if boundary has fewer than 3 vertices.
+        Fully vectorized.
         """
         bnd = self.boundary
         n = len(bnd)
         if n < 3:
             return 180.0
 
-        min_angle = 360.0
-        for i in range(n):
-            prev_idx = (i - 1) % n
-            next_idx = (i + 1) % n
-            v1 = bnd[prev_idx] - bnd[i]
-            v2 = bnd[next_idx] - bnd[i]
-            v1_norm = np.linalg.norm(v1)
-            v2_norm = np.linalg.norm(v2)
-            if v1_norm < 1e-12 or v2_norm < 1e-12:
-                continue
-            dot = np.clip(np.dot(v1, v2) / (v1_norm * v2_norm), -1.0, 1.0)
-            angle = np.arccos(dot) * 180.0 / np.pi
-            if angle < min_angle:
-                min_angle = angle
-        return min_angle
+        indices = np.arange(n)
+        v1 = bnd[(indices - 1) % n] - bnd  # (n, 2)
+        v2 = bnd[(indices + 1) % n] - bnd  # (n, 2)
+        v1_norms = np.linalg.norm(v1, axis=1)
+        v2_norms = np.linalg.norm(v2, axis=1)
+        valid = (v1_norms > 1e-12) & (v2_norms > 1e-12)
+        if not np.any(valid):
+            return 180.0
+        dots = np.clip(np.sum(v1[valid] * v2[valid], axis=1) / (v1_norms[valid] * v2_norms[valid]), -1.0, 1.0)
+        angles = np.arccos(dots) * (180.0 / np.pi)
+        return float(np.min(angles))
 
     def is_boundary_triangle(self, triangle):
         """Check if a triangle has at least one edge on the original domain boundary."""
@@ -766,13 +776,9 @@ class MeshEnvironment(gym.Env):
         if n == 0:
             return
 
-        # 1. Find which boundary vertex indices are in the element
-        elem_boundary_indices = []
-        for i in range(n):
-            for ev in new_element:
-                if np.allclose(self.boundary[i], ev, atol=1e-10):
-                    elem_boundary_indices.append(i)
-                    break
+        # 1. Find which boundary vertex indices are in the element (vectorized)
+        elem_indices = self._find_vertex_indices(np.asarray(new_element))
+        elem_boundary_indices = [int(idx) for idx in elem_indices if idx != -1]
 
         if len(elem_boundary_indices) == 0:
             return
@@ -807,13 +813,11 @@ class MeshEnvironment(gym.Env):
         last_consumed_coord = self.boundary[consumed[-1]]
         first_consumed_coord = self.boundary[consumed[0]]
 
-        end_elem_idx = None
-        start_elem_idx = None
-        for i, ev in enumerate(elem_list):
-            if np.allclose(ev, last_consumed_coord, atol=1e-10):
-                end_elem_idx = i
-            if np.allclose(ev, first_consumed_coord, atol=1e-10):
-                start_elem_idx = i
+        elem_arr = np.asarray(elem_list)
+        last_dists = np.sum((elem_arr - last_consumed_coord) ** 2, axis=1)
+        first_dists = np.sum((elem_arr - first_consumed_coord) ** 2, axis=1)
+        end_elem_idx = int(np.argmin(last_dists)) if np.min(last_dists) < 1e-18 else None
+        start_elem_idx = int(np.argmin(first_dists)) if np.min(first_dists) < 1e-18 else None
 
         if end_elem_idx is None or start_elem_idx is None:
             return
@@ -872,6 +876,7 @@ class MeshEnvironment(gym.Env):
             actions, mask = self._enumerate_for_vertex(ref_vertex, n_angle, n_dist, max_actions)
             if np.any(mask):
                 self._cached_ref_vertex = ref_vertex.copy()
+                self._cached_ref_idx = self._find_vertex_index(ref_vertex)
                 self._cached_actions = (actions, mask)
                 return actions, mask
 
@@ -879,38 +884,41 @@ class MeshEnvironment(gym.Env):
         actions = [(0, None)] + [(1, None)] * (n_angle * n_dist)
         mask = np.zeros(max_actions, dtype=bool)
         self._cached_ref_vertex = vertex_order[0].copy() if vertex_order else None
+        self._cached_ref_idx = self._find_vertex_index(vertex_order[0]) if vertex_order else -1
         self._cached_actions = (actions, mask)
         return actions, mask
 
     def _get_vertices_by_angle(self):
-        """Return boundary vertices sorted by interior angle (smallest first)."""
-        if len(self.boundary) == 0:
+        """Return boundary vertices sorted by interior angle (smallest first, vectorized)."""
+        n_bnd = len(self.boundary)
+        if n_bnd == 0:
             return []
-        if len(self.boundary) <= 2:
+        if n_bnd <= 2:
             return [self.boundary[0]]
 
-        angles_and_verts = []
-        for i in range(len(self.boundary)):
-            angles = []
-            for j in range(1, min(self.n_rv + 1, len(self.boundary))):
-                left_idx = (i - j) % len(self.boundary)
-                right_idx = (i + j) % len(self.boundary)
+        n_rv = min(self.n_rv, n_bnd - 1)
+        avg_angles = np.zeros(n_bnd)
+        indices = np.arange(n_bnd)
 
-                v1 = self.boundary[left_idx] - self.boundary[i]
-                v2 = self.boundary[right_idx] - self.boundary[i]
+        for j in range(1, n_rv + 1):
+            left_indices = (indices - j) % n_bnd
+            right_indices = (indices + j) % n_bnd
 
-                v1_norm = v1 / max(1e-10, np.linalg.norm(v1))
-                v2_norm = v2 / max(1e-10, np.linalg.norm(v2))
+            v1 = self.boundary[left_indices] - self.boundary  # (n_bnd, 2)
+            v2 = self.boundary[right_indices] - self.boundary  # (n_bnd, 2)
 
-                dot_product = np.clip(np.dot(v1_norm, v2_norm), -1.0, 1.0)
-                angle = np.arccos(dot_product)
-                angles.append(angle)
+            v1_norms = np.maximum(1e-10, np.linalg.norm(v1, axis=1, keepdims=True))
+            v2_norms = np.maximum(1e-10, np.linalg.norm(v2, axis=1, keepdims=True))
 
-            avg_angle = np.mean(angles)
-            angles_and_verts.append((avg_angle, i))
+            v1_normed = v1 / v1_norms
+            v2_normed = v2 / v2_norms
 
-        angles_and_verts.sort(key=lambda x: x[0])
-        return [self.boundary[idx] for _, idx in angles_and_verts]
+            dots = np.clip(np.sum(v1_normed * v2_normed, axis=1), -1.0, 1.0)
+            avg_angles += np.arccos(dots)
+
+        avg_angles /= n_rv
+        sorted_indices = np.argsort(avg_angles)
+        return [self.boundary[idx] for idx in sorted_indices]
 
     def _enumerate_for_vertex(self, ref_vertex, n_angle, n_dist, max_actions):
         """Enumerate valid actions for a specific reference vertex (vectorized)."""
@@ -918,11 +926,7 @@ class MeshEnvironment(gym.Env):
         mask = np.zeros(max_actions, dtype=bool)
 
         # --- Find ref_idx once for the whole method ---
-        ref_idx = -1
-        for i, v in enumerate(self.boundary):
-            if np.allclose(v, ref_vertex, atol=1e-10):
-                ref_idx = i
-                break
+        ref_idx = self._find_vertex_index(ref_vertex)
 
         # --- Type-0: deterministic quad from existing boundary vertices ---
         element, valid = self._form_element_fast(ref_vertex, 0, None, ref_idx)
@@ -1085,6 +1089,7 @@ class MeshEnvironment(gym.Env):
         """Clear the cached valid actions."""
         self._cached_actions = None
         self._cached_ref_vertex = None
+        self._cached_ref_idx = None
         self._cached_radius = None
 
     def plot_domain(self):
