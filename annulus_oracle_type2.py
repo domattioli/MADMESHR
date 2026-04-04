@@ -107,9 +107,20 @@ def run_oracle(max_steps=200, verbose=True):
     type2_count = 0
     type0_count = 0
     type1_count = 0
+    loop_count = 0  # Track which loop we're meshing
 
     for step in range(max_steps):
         n = len(env.boundary)
+
+        # Activate pending loop if current boundary is complete
+        if n < 3 and env.pending_loops:
+            env._activate_next_loop()
+            loop_count += 1
+            n = len(env.boundary)
+            if verbose:
+                print(f"Step {step}: Activated pending loop {loop_count} "
+                      f"({n} vertices, {len(env.pending_loops)} remaining)")
+            boundary_trajectory.append(n)
 
         if n < 3:
             if verbose:
@@ -122,8 +133,9 @@ def run_oracle(max_steps=200, verbose=True):
             env.element_qualities.append(0.3)
             env.boundary = np.empty((0, 2))
             if verbose:
-                print(f"Step {step}: Triangle remainder, mesh complete!")
-            break
+                print(f"Step {step}: Triangle remainder")
+            boundary_trajectory.append(0)
+            continue  # Check for pending loops at top of next iteration
 
         if n == 4:
             quad = np.array(env.boundary)
@@ -133,16 +145,18 @@ def run_oracle(max_steps=200, verbose=True):
                 env.element_qualities.append(q)
                 env.boundary = np.empty((0, 2))
                 if verbose:
-                    print(f"Step {step}: Final quad, q={q:.4f}, mesh complete!")
-                break
+                    print(f"Step {step}: Final quad, q={q:.4f}")
+                boundary_trajectory.append(0)
+                continue  # Check for pending loops
             else:
                 env.elements.append(np.array([quad[0], quad[1], quad[2]]))
                 env.elements.append(np.array([quad[0], quad[2], quad[3]]))
                 env.element_qualities.extend([0.2, 0.2])
                 env.boundary = np.empty((0, 2))
                 if verbose:
-                    print(f"Step {step}: Final quad self-intersects, split into 2T, mesh complete!")
-                break
+                    print(f"Step {step}: Final quad self-intersects, split into 2T")
+                boundary_trajectory.append(0)
+                continue  # Check for pending loops
 
         placed = False
 
@@ -244,7 +258,7 @@ def run_oracle(max_steps=200, verbose=True):
             break
 
     # Report
-    complete = len(env.boundary) < 3
+    complete = len(env.boundary) < 3 and not env.pending_loops
     mean_q = np.mean(env.element_qualities) if env.element_qualities else 0.0
     n_elem = len(env.elements)
     n_quads = sum(1 for e in env.elements if len(e) == 4)
@@ -258,6 +272,7 @@ def run_oracle(max_steps=200, verbose=True):
     print(f"Type-2 actions:  {type2_count}")
     print(f"Type-0 actions:  {type0_count}")
     print(f"Type-1 actions:  {type1_count}")
+    print(f"Loops meshed:    {loop_count + 1}")
     print(f"Mean quality:    {mean_q:.4f}")
     print(f"Boundary:        {boundary_trajectory[0]} -> {len(env.boundary)} vertices")
     print(f"Trajectory:      {' -> '.join(str(x) for x in boundary_trajectory)}")

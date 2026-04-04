@@ -391,8 +391,8 @@ class TestType2Actions:
                     valid_count += 1
         assert valid_count >= 1, "Expected at least 1 valid type-2 quad"
 
-    def test_boundary_update_preserves_single_loop(self):
-        """After type-2 boundary update, boundary should be a valid single loop."""
+    def test_type2_produces_two_loops(self):
+        """Type-2 boundary update should split into two separate loops."""
         env = self._make_annulus_env()
         env.reset()
         orig_len = len(env.boundary)
@@ -406,12 +406,136 @@ class TestType2Actions:
                     env.element_qualities.append(env._calculate_element_quality(elem))
                     ok = env._update_boundary_type2(elem, i, far_idx, consumed)
                     assert ok, "Boundary update should succeed"
-                    assert len(env.boundary) < orig_len, "Boundary should shrink"
-                    area = env._calculate_polygon_area(env.boundary)
-                    assert area > 0, "Boundary should have positive area"
+                    # Should have active boundary + one pending loop
+                    assert len(env.boundary) > 0, "Active boundary should exist"
+                    assert len(env.pending_loops) == 1, "Should have exactly 1 pending loop"
+                    # Both loops should have positive area
+                    area_active = env._calculate_polygon_area(env.boundary)
+                    area_pending = env._calculate_polygon_area(env.pending_loops[0])
+                    assert area_active > 0, "Active boundary should have positive area"
+                    assert area_pending > 0, "Pending loop should have positive area"
+                    # Total vertices should be less than original
+                    total_verts = len(env.boundary) + len(env.pending_loops[0])
+                    assert total_verts < orig_len, "Total vertices should shrink"
                     return
 
         pytest.fail("No valid type-2 action found to test boundary update")
+
+    def test_type2_no_edges_through_element(self):
+        """Neither loop's edges should cross through the placed type-2 element."""
+        env = self._make_annulus_env()
+        env.reset()
+
+        for i in range(len(env.boundary)):
+            for far_idx, _ in env._find_proximity_pairs(i, threshold=0.02, min_gap=3):
+                elem, consumed = env._form_type2_element(i, far_idx)
+                if elem is not None:
+                    env.elements.append(elem)
+                    env.element_qualities.append(env._calculate_element_quality(elem))
+                    env._update_boundary_type2(elem, i, far_idx, consumed)
+
+                    # Check both loops
+                    for loop_name, loop in [("active", env.boundary),
+                                            ("pending", env.pending_loops[0] if env.pending_loops else np.empty((0,2)))]:
+                        for ib in range(len(loop)):
+                            jb = (ib + 1) % len(loop)
+                            bp1, bp2 = loop[ib], loop[jb]
+                            for ie in range(4):
+                                je = (ie + 1) % 4
+                                ep1, ep2 = elem[ie], elem[je]
+                                # Skip shared endpoints
+                                if any(np.linalg.norm(a - b) < 1e-8
+                                       for a in [bp1, bp2] for b in [ep1, ep2]):
+                                    continue
+                                cross = env._do_segments_intersect(bp1, bp2, ep1, ep2)
+                                assert not cross, (
+                                    f"{loop_name} loop edge ({ib},{jb}) crosses "
+                                    f"element edge ({ie},{je})")
+                    return
+
+        pytest.fail("No valid type-2 action found")
+
+    def test_pending_loop_activation(self):
+        """When active boundary completes, pending loop should be activated."""
+        env = self._make_annulus_env()
+        env.reset()
+
+        # Place a type-2 quad to create pending loop
+        for i in range(len(env.boundary)):
+            for far_idx, _ in env._find_proximity_pairs(i, threshold=0.02, min_gap=3):
+                elem, consumed = env._form_type2_element(i, far_idx)
+                if elem is not None:
+                    env.elements.append(elem)
+                    env.element_qualities.append(env._calculate_element_quality(elem))
+                    env._update_boundary_type2(elem, i, far_idx, consumed)
+
+                    assert len(env.pending_loops) == 1
+                    pending_size = len(env.pending_loops[0])
+
+                    # Simulate active loop completion
+                    env.boundary = np.empty((0, 2))
+                    activated = env._activate_next_loop()
+
+                    assert activated, "Should activate pending loop"
+                    assert len(env.boundary) == pending_size, "Boundary should be the pending loop"
+                    assert len(env.pending_loops) == 0, "No more pending loops"
+                    assert env._calculate_polygon_area(env.boundary) > 0
+                    return
+
+        pytest.fail("No valid type-2 action found")
+
+    def test_reset_clears_pending_loops(self):
+        """Reset should clear pending_loops."""
+        env = self._make_annulus_env()
+        env.reset()
+
+        # Place type-2 to create pending loop
+        for i in range(len(env.boundary)):
+            for far_idx, _ in env._find_proximity_pairs(i, threshold=0.02, min_gap=3):
+                elem, consumed = env._form_type2_element(i, far_idx)
+                if elem is not None:
+                    env.elements.append(elem)
+                    env.element_qualities.append(env._calculate_element_quality(elem))
+                    env._update_boundary_type2(elem, i, far_idx, consumed)
+                    assert len(env.pending_loops) > 0
+
+                    # Reset should clear everything
+                    env.reset()
+                    assert len(env.pending_loops) == 0
+                    assert len(env.elements) == 0
+                    return
+
+        pytest.fail("No valid type-2 action found")
+
+
+class TestBoundaryGrowthGuard:
+    """Tests for boundary growth detection and prevention."""
+
+    def _make_annulus_env(self):
+        bnd = np.load(os.path.join(os.path.dirname(__file__), '..', 'domains', 'annulus_layer2.npy'))
+        return DiscreteActionEnv(MeshEnvironment(initial_boundary=bnd))
+
+    def test_boundary_never_grows_random_actions(self):
+        """Boundary should never grow during 50 random valid action steps on annulus."""
+        env = self._make_annulus_env()
+        state, info = env.reset()
+
+        for step in range(50):
+            mask = info["action_mask"]
+            valid_actions = np.where(mask)[0]
+            if len(valid_actions) == 0:
+                break
+
+            action = np.random.choice(valid_actions)
+            prev_bnd = len(env.env.boundary)
+            state, reward, done, truncated, info = env.step(action)
+
+            # Boundary should never grow (growth guard should catch it)
+            assert len(env.env.boundary) <= prev_bnd or done, (
+                f"Step {step}: boundary grew from {prev_bnd} to {len(env.env.boundary)}")
+
+            if done or truncated:
+                break
 
 
 if __name__ == "__main__":

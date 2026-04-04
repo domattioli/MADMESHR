@@ -34,7 +34,7 @@ python main.py --domain star --greedy
 python quality_diagnostic.py
 ```
 
-Available domains: `square`, `octagon`, `circle`, `star`, `l-shape`, `rectangle`
+Available domains: `square`, `octagon`, `circle`, `star`, `l-shape`, `rectangle`, `h-shape`, `annulus-layer2`
 
 ## Architecture
 
@@ -49,7 +49,7 @@ main.py (CLI + domain registry)
 
 ### Key Components
 
-- **`src/MeshEnvironment.py`** (~1080 lines): Core advancing-front environment. Manages polygon boundary, element formation (`_form_element`), boundary updates (`_update_boundary`), state computation, reward calculation, and geometry utilities (intersection, convexity, point-in-polygon). The continuous action space `[-1,1]^3` maps to element type + vertex placement.
+- **`src/MeshEnvironment.py`** (~1400 lines): Core advancing-front environment. Manages polygon boundary, element formation (`_form_element`), boundary updates (`_update_boundary`, `_update_boundary_type2`), state computation, reward calculation, and geometry utilities (intersection, convexity, point-in-polygon). The continuous action space `[-1,1]^3` maps to element type + vertex placement. Supports multi-loop boundaries via `pending_loops` for type-2 splits.
 
 - **`src/DiscreteActionEnv.py`**: Wraps MeshEnvironment with a Discrete(49) action space. Action 0 = type-0 (connect adjacent vertices). Actions 1-48 = type-1 on a 12-angle × 4-radial grid (interior vertex placement). Provides `info["action_mask"]` boolean array and enriched 44-float state vector.
 
@@ -95,3 +95,5 @@ All development sessions must follow the adversarial planning process documented
 - Quality ceiling is geometry-limited (star≈0.44, circle≈0.78, octagon≈0.61), not discretization-limited.
 - SAC agent (`src/SAC.py`, `src/trainer.py`) is legacy and does not learn effectively — DQN is the active approach.
 - Octagon quality (0.478) still below 0.50 target and 0.61 ceiling — room for improvement.
+- Type-2 boundary split now correctly produces two separate loops (session 10). Annulus oracle: 23Q, q=0.420 (incomplete, stuck at 21 boundary vertices on active loop).
+- DiscreteActionEnv has boundary growth guard (session 10): reverts elements that increase boundary count.

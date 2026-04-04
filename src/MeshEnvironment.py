@@ -61,6 +61,9 @@ class MeshEnvironment(gym.Env):
         self._cached_actions = None
         self._cached_ref_idx = None
 
+        # Multi-loop support: pending loops from type-2 splits
+        self.pending_loops = []
+
         # Reset the environment
         self.reset()
     
@@ -69,6 +72,7 @@ class MeshEnvironment(gym.Env):
         self.boundary = self.initial_boundary.copy()
         self.elements = []
         self.element_qualities = []
+        self.pending_loops = []
         self._invalidate_action_cache()
         state = self._get_state()
         return state, {}
@@ -1214,12 +1218,14 @@ class MeshEnvironment(gym.Env):
         return False
 
     def _update_boundary_type2(self, element, ref_idx, far_idx, consumed):
-        """Update boundary after a type-2 element consumes non-contiguous vertices.
+        """Update boundary after a type-2 element, splitting into two loops.
 
-        A type-2 quad consumes vertices from two separate locations on the boundary.
-        The consumed set may be 4 vertices (non-coincident) or 6 vertices (coincident
-        pair + their 4 neighbors). The surviving vertices form two arcs that are
-        reconnected into a single loop.
+        A type-2 quad bridges two non-adjacent boundary segments. After placing
+        it, the domain splits into two separate sub-domains (loops). The shorter
+        loop goes to pending_loops; the longer becomes the active boundary.
+
+        Each surviving arc is closed into a loop by adding the quad vertices
+        that connect the arc endpoints through the quad.
 
         Args:
             element: (4, 2) array of quad vertices.
@@ -1234,17 +1240,14 @@ class MeshEnvironment(gym.Env):
         consumed_set = set(consumed)
 
         # Find the two contiguous consumed segments by walking the boundary.
-        # A segment is a maximal contiguous run of consumed indices.
         segments = []
         visited = set()
         for start_candidate in sorted(consumed_set):
             if start_candidate in visited:
                 continue
-            # Find the start of this contiguous run (walk backward)
             s = start_candidate
             while (s - 1) % n in consumed_set and (s - 1) % n not in visited:
                 s = (s - 1) % n
-            # Walk forward to find the full segment
             seg = []
             idx = s
             while idx in consumed_set and idx not in visited:
@@ -1259,40 +1262,208 @@ class MeshEnvironment(gym.Env):
 
         seg1, seg2 = segments[0], segments[1]
 
-        # Arc 1: from end of seg1+1 to start of seg2-1 (walking forward)
-        arc1 = []
+        # Arc 1: surviving boundary from end of seg1 to start of seg2
+        arc1_indices = []
         idx = (seg1[-1] + 1) % n
         while idx != seg2[0]:
-            arc1.append(idx)
+            arc1_indices.append(idx)
             idx = (idx + 1) % n
 
-        # Arc 2: from end of seg2+1 to start of seg1-1 (walking forward)
-        arc2 = []
+        # Arc 2: surviving boundary from end of seg2 to start of seg1
+        arc2_indices = []
         idx = (seg2[-1] + 1) % n
         while idx != seg1[0]:
-            arc2.append(idx)
+            arc2_indices.append(idx)
             idx = (idx + 1) % n
 
-        new_boundary_indices = arc1 + arc2
-
-        if len(new_boundary_indices) == 0:
+        if len(arc1_indices) == 0 and len(arc2_indices) == 0:
             self.boundary = np.empty((0, 2))
             return True
 
-        new_boundary = self.boundary[new_boundary_indices]
+        # Build closed loops. Each arc is bordered by quad vertices at its
+        # endpoints. We need to find which quad vertices to add to close
+        # each arc into a loop.
+        #
+        # The arc1 boundary starts after seg1[-1] and ends before seg2[0].
+        # The boundary vertices at seg1[-1] and seg2[0] are consumed, but
+        # their neighbors seg1[-1]-1 (if not consumed) or the quad vertex
+        # at that position connects to the arc.
+        #
+        # Strategy: the quad vertices that are adjacent to the arc endpoints
+        # in the original boundary form the closing edges. For each arc, we
+        # find which element vertices match the boundary vertices at the
+        # segment endpoints, then walk the element cycle to connect them.
 
-        # Verify winding: should have positive area (CCW)
-        area = self._calculate_polygon_area(new_boundary)
-        if area < 1e-14:
-            # Try reversed arc ordering
-            new_boundary_indices = arc2 + arc1
-            new_boundary = self.boundary[new_boundary_indices]
-            area = self._calculate_polygon_area(new_boundary)
-            if area < 1e-14:
-                return False
+        elem_arr = np.asarray(element)
 
-        self.boundary = new_boundary
+        def _close_arc_into_loop(arc_indices, seg_before, seg_after):
+            """Close an arc into a loop using quad vertices.
+
+            seg_before: the consumed segment whose END borders this arc's start
+            seg_after: the consumed segment whose START borders this arc's end
+
+            The arc goes from boundary[seg_before[-1]+1] to boundary[seg_after[0]-1].
+            We need quad vertices to connect from boundary[seg_after[0]-1]'s side
+            back to boundary[seg_before[-1]+1]'s side.
+            """
+            if len(arc_indices) == 0:
+                return None  # Degenerate: no surviving vertices in this arc
+
+            # The boundary vertices just outside the arc (at segment boundaries)
+            # are the quad vertices that connect to the arc.
+            # seg_before[-1] is the last consumed vertex before the arc
+            # seg_after[0] is the first consumed vertex after the arc
+            # The quad vertices at seg_before[-1] and seg_after[0] positions
+            # may or may not be part of the quad. But the quad vertices that
+            # are boundary neighbors of the arc endpoints ARE on the quad.
+
+            # Find which element vertices correspond to boundary positions
+            # at the arc borders. The arc is bounded by:
+            #   - pre_arc = boundary[seg_before[-1]]: last consumed before arc
+            #   - post_arc = boundary[seg_after[0]]: first consumed after arc
+            # The element vertices adjacent to these in the boundary are the
+            # closing vertices.
+
+            # Actually, simpler approach: the first/last arc vertices are
+            # boundary vertices adjacent to consumed segments. The quad
+            # vertex coordinates that match boundary[seg_before[-1]] and
+            # boundary[seg_after[0]] (or their neighbors) will close the loop.
+
+            # The closing vertices are the quad vertices that are NOT in this arc
+            # but connect to it. We find them by matching quad vertices to
+            # boundary positions at the segment boundaries.
+
+            # Identify quad vertices by their boundary indices
+            elem_to_bnd = {}
+            for ei in range(4):
+                dists = np.sum((self.boundary - elem_arr[ei]) ** 2, axis=1)
+                min_idx = int(np.argmin(dists))
+                if dists[min_idx] < 1e-14:
+                    elem_to_bnd[ei] = min_idx
+
+            # The arc boundary indices don't include the segment endpoints.
+            # To close the loop, we need to go from the arc's last vertex
+            # to the arc's first vertex through quad vertices.
+            # The arc's "border" in the original boundary is:
+            #   ... seg_before[-1], arc[0], arc[1], ..., arc[-1], seg_after[0] ...
+            # So boundary[seg_before[-1]] and boundary[seg_after[0]] are adjacent
+            # to the arc but consumed. The quad vertices at those positions
+            # connect to the arc.
+
+            # Find which element vertices sit at seg_before[-1] and seg_after[0]
+            pre_bnd_idx = seg_before[-1]
+            post_bnd_idx = seg_after[0]
+
+            pre_elem_idx = None
+            post_elem_idx = None
+            for ei, bi in elem_to_bnd.items():
+                if bi == pre_bnd_idx:
+                    pre_elem_idx = ei
+                if bi == post_bnd_idx:
+                    post_elem_idx = ei
+
+            # If the segment endpoints aren't quad vertices (e.g. the coincident
+            # vertex itself), look for the adjacent quad vertex
+            if pre_elem_idx is None:
+                # Try the vertex before: seg_before[-1] might be the coincident
+                # vertex whose neighbor is a quad vertex
+                for offset in [-1, 1, -2, 2]:
+                    test_idx = (pre_bnd_idx + offset) % n
+                    for ei, bi in elem_to_bnd.items():
+                        if bi == test_idx:
+                            pre_elem_idx = ei
+                            break
+                    if pre_elem_idx is not None:
+                        break
+
+            if post_elem_idx is None:
+                for offset in [1, -1, 2, -2]:
+                    test_idx = (post_bnd_idx + offset) % n
+                    for ei, bi in elem_to_bnd.items():
+                        if bi == test_idx:
+                            post_elem_idx = ei
+                            break
+                    if post_elem_idx is not None:
+                        break
+
+            if pre_elem_idx is None or post_elem_idx is None:
+                return None
+
+            # Walk element cycle from post_elem_idx to pre_elem_idx in BOTH
+            # directions. The correct closing uses the SHORT path (fewer quad
+            # vertices), which gives the sub-domain area. The long path wraps
+            # around the quad and includes its area — wrong.
+            candidates = []
+            for direction in [1, -1]:
+                closing = []
+                curr = post_elem_idx
+                closing.append(elem_arr[curr].copy())
+                curr = (curr + direction) % 4
+                while curr != pre_elem_idx:
+                    closing.append(elem_arr[curr].copy())
+                    curr = (curr + direction) % 4
+                closing.append(elem_arr[pre_elem_idx].copy())
+
+                loop_coords = [self.boundary[ai].copy() for ai in arc_indices]
+                loop_coords.extend(closing)
+                loop = np.array(loop_coords)
+                area = self._calculate_polygon_area(loop)
+                if area > 1e-14:
+                    candidates.append((loop, area))
+
+            if not candidates:
+                return None
+
+            # Pick the candidate with SMALLER area (correct sub-domain,
+            # not the one that wraps around the quad)
+            candidates.sort(key=lambda x: x[1])
+            return candidates[0][0]
+
+        loop1 = _close_arc_into_loop(arc1_indices, seg1, seg2)
+        loop2 = _close_arc_into_loop(arc2_indices, seg2, seg1)
+
+        if loop1 is None and loop2 is None:
+            return False
+
+        # Collect valid loops
+        valid_loops = []
+        if loop1 is not None and len(loop1) >= 3:
+            valid_loops.append(loop1)
+        if loop2 is not None and len(loop2) >= 3:
+            valid_loops.append(loop2)
+
+        if len(valid_loops) == 0:
+            self.boundary = np.empty((0, 2))
+            return True
+
+        if len(valid_loops) == 1:
+            self.boundary = valid_loops[0]
+            return True
+
+        # Two valid loops: longer becomes active boundary, shorter goes to pending
+        if len(valid_loops[0]) >= len(valid_loops[1]):
+            self.boundary = valid_loops[0]
+            self.pending_loops.append(valid_loops[1])
+        else:
+            self.boundary = valid_loops[1]
+            self.pending_loops.append(valid_loops[0])
+
         return True
+
+    def _activate_next_loop(self):
+        """Activate the next pending loop when the current boundary is completed.
+
+        When boundary has < 3 vertices and pending_loops is non-empty,
+        pop the next loop and set it as the active boundary.
+
+        Returns:
+            True if a pending loop was activated, False if none remain.
+        """
+        if len(self.boundary) < 3 and self.pending_loops:
+            self.boundary = self.pending_loops.pop(0)
+            self._invalidate_action_cache()
+            return True
+        return False
 
     def _invalidate_action_cache(self):
         """Clear the cached valid actions."""

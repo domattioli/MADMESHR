@@ -81,19 +81,40 @@ class DiscreteActionEnv(gym.Wrapper):
         quality = self.env._calculate_element_quality(new_element)
         self.env.element_qualities.append(quality)
 
-        # Update boundary
+        # Update boundary (with growth guard)
+        saved_boundary = self.env.boundary.copy()
+        saved_boundary_count = len(saved_boundary)
         self.env._update_boundary(new_element)
+
+        # Boundary growth guard: undo if boundary grew
+        if len(self.env.boundary) > saved_boundary_count:
+            self.env.elements.pop()
+            self.env.element_qualities.pop()
+            self.env.boundary = saved_boundary
+            self.env._invalidate_action_cache()
+            self._enumerate()
+            enriched = self.env._get_enriched_state()
+            info = {"valid": False, "action_mask": self._action_mask.copy()}
+            return enriched, -0.1, False, False, info
+
         self.env._invalidate_action_cache()
 
         # Check if meshing complete
         remaining_area = self.env._calculate_polygon_area(self.env.boundary)
         area_ratio = remaining_area / max(1e-10, self.env.original_area)
 
+        # Helper: check and activate pending loops
+        has_pending = hasattr(self.env, 'pending_loops') and len(self.env.pending_loops) > 0
+
+        # Activate pending loop if current boundary is complete
+        if len(self.env.boundary) < 3 and has_pending:
+            self.env._activate_next_loop()
+
         done = False
         eta_e, eta_b, mu = 0.0, 0.0, 0.0
         bnd_len = len(self.env.boundary)
         if bnd_len < 3:
-            # Boundary fully consumed — all quads, best possible outcome
+            # Boundary fully consumed and no pending loops — mesh complete
             mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0.0
             reward = 5.0 + 10.0 * mean_q  # quality-gated completion bonus
             done = True
@@ -108,7 +129,12 @@ class DiscreteActionEnv(gym.Wrapper):
                 reward = 5.0 + 10.0 * mean_q  # boundary triangle: quality-gated
             else:
                 reward = 3.0  # interior triangle: heavy penalty
-            done = True
+            # Check for pending loops before marking done
+            if hasattr(self.env, 'pending_loops') and self.env.pending_loops:
+                self.env._activate_next_loop()
+                done = False
+            else:
+                done = True
         elif bnd_len == 4:
             bnd_quad = np.array(self.env.boundary)
             # Accept any non-self-intersecting quad (convex or concave)
@@ -119,7 +145,14 @@ class DiscreteActionEnv(gym.Wrapper):
                 self.env.boundary = np.empty((0, 2))
                 mean_q = np.mean(self.env.element_qualities) if self.env.element_qualities else 0.0
                 reward = 5.0 + 10.0 * mean_q  # quality-gated completion bonus
-                done = True
+                # Check for pending loops before marking done
+                if hasattr(self.env, 'pending_loops') and self.env.pending_loops:
+                    self.env._activate_next_loop()
+                    done = False
+                    # Adjust reward: not a completion, use per-step reward instead
+                    reward = quality_final + 0.3 * (self.env.compute_min_boundary_angle() / 180.0 - 1.0)
+                else:
+                    done = True
             else:
                 # Self-intersecting quad → 2 triangles (worst outcome)
                 bnd = self.env.boundary
@@ -128,7 +161,11 @@ class DiscreteActionEnv(gym.Wrapper):
                 self.env.element_qualities.extend([0.2, 0.2])
                 self.env.boundary = np.empty((0, 2))
                 reward = 2.0  # worst completion
-                done = True
+                if hasattr(self.env, 'pending_loops') and self.env.pending_loops:
+                    self.env._activate_next_loop()
+                    done = False
+                else:
+                    done = True
         else:
             # --- Pan et al. per-step reward: r = eta_e + eta_b + mu ---
 

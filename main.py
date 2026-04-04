@@ -79,6 +79,17 @@ def _make_rectangle():
     return np.array(bottom + right + top + left, dtype=float)
 
 
+@register_domain("h-shape", "12-vertex H-shaped concave domain (4x4 with crossbar)", max_ep_len=20)
+def _make_h_shape():
+    # CCW winding: 12 vertices on unit grid
+    # Two vertical bars (1 unit wide) connected by a crossbar (2 units wide, 2 units tall)
+    return np.array([
+        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [3.0, 1.0],
+        [3.0, 0.0], [4.0, 0.0], [4.0, 4.0], [3.0, 4.0],
+        [3.0, 3.0], [1.0, 3.0], [1.0, 4.0], [0.0, 4.0],
+    ], dtype=float)
+
+
 @register_domain("annulus-layer2", "64-vertex non-convex subdomain from CHILmesh annulus layer 2", max_ep_len=70)
 def _make_annulus_layer2():
     import os
