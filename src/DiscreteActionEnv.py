@@ -213,9 +213,12 @@ class DiscreteActionEnv(gym.Wrapper):
                 reward = eta_e + 0.3 * eta_b + split_bonus
             else:
                 # Type-0/1 reward: eta_e + 0.3*eta_b + mu
+                # Scale density thresholds by expected element count
                 element_area = self.env._calculate_polygon_area(new_element)
-                A_min = 0.01 * self.env.original_area
-                A_max = 0.1 * self.env.original_area
+                n_expected = max(1, len(self.env.initial_boundary) / 2)
+                ideal_area = self.env.original_area / n_expected
+                A_min = 0.1 * ideal_area
+                A_max = 0.5 * ideal_area
                 if element_area < A_min:
                     mu = -1.0
                 elif element_area < A_max:
