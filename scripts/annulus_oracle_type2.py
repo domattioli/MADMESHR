@@ -11,7 +11,7 @@ import numpy as np
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.MeshEnvironment import MeshEnvironment
 
@@ -98,7 +98,7 @@ def _try_place_element(env, elem, update_fn, orig_boundary, verbose_tag="", verb
 
 
 def run_oracle(max_steps=200, verbose=True):
-    bnd = np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_layer2.npy"))
+    bnd = np.load(os.path.join(os.path.dirname(__file__), '..', "domains", "annulus_layer2.npy"))
     env = MeshEnvironment(initial_boundary=bnd)
     env.reset()
 

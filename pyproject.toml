@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "madmeshr"
+version = "0.1.0"
+description = "RL-based 2D quad mesh generator using advancing-front method and DQN"
+requires-python = ">=3.10"
+dependencies = [
+    "tensorflow>=2.21.0",
+    "tensorflow-probability>=0.25.0",
+    "numpy>=2.4.0",
+    "gym>=0.26.2",
+    "matplotlib>=3.10.0",
+    "imageio>=2.37.0",
+    "tqdm>=4.67.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.0",
+]
+
+[project.scripts]
+madmeshr = "main:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.setuptools.package-data]
+"*" = ["domains/*.npy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -79,15 +79,21 @@ def _make_rectangle():
     return np.array(bottom + right + top + left, dtype=float)
 
 
-@register_domain("h-shape", "20-vertex H-shaped concave domain (4x4, 1-unit edge spacing)", max_ep_len=30)
+@register_domain("h-shape", "24-vertex H-shaped concave domain (4x4, crossbar y=1.5-2.5)", max_ep_len=30)
 def _make_h_shape():
-    # CCW winding: 20 vertices on unit grid with 1-unit spacing between all vertices
-    # Two vertical bars (1 unit wide) connected by a crossbar (2 units wide, 2 units tall)
+    # CCW winding: 24 vertices, crossbar spans y=1.5 to y=2.5
+    # Two vertical bars (1 unit wide) connected by a crossbar (2 units wide, 1 unit tall)
+    # Vertices at y=1.0 and y=3.0 retained on inner walls
     return np.array([
-        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [2.0, 1.0], [3.0, 1.0],
-        [3.0, 0.0], [4.0, 0.0], [4.0, 1.0], [4.0, 2.0], [4.0, 3.0],
-        [4.0, 4.0], [3.0, 4.0], [3.0, 3.0], [2.0, 3.0], [1.0, 3.0],
-        [1.0, 4.0], [0.0, 4.0], [0.0, 3.0], [0.0, 2.0], [0.0, 1.0],
+        [0.0, 0.0], [1.0, 0.0],                          # bottom of left bar
+        [1.0, 1.0], [1.0, 1.5],                           # left inner wall up to crossbar
+        [2.0, 1.5], [3.0, 1.5],                           # bottom edge of crossbar
+        [3.0, 1.0], [3.0, 0.0],                           # right inner wall down
+        [4.0, 0.0], [4.0, 1.0], [4.0, 2.0], [4.0, 3.0], [4.0, 4.0],  # right outer wall
+        [3.0, 4.0], [3.0, 3.0], [3.0, 2.5],              # right inner wall down to crossbar
+        [2.0, 2.5], [1.0, 2.5],                           # top edge of crossbar
+        [1.0, 3.0], [1.0, 4.0],                           # left inner wall up
+        [0.0, 4.0], [0.0, 3.0], [0.0, 2.0], [0.0, 1.0], # left outer wall
     ], dtype=float)
 
 
@@ -212,6 +218,10 @@ def parse_args():
     # Epsilon schedule (DQN only)
     parser.add_argument('--epsilon-decay-frac', type=float, default=0.7,
                         help='Fraction of training over which epsilon decays (default: 0.7)')
+    parser.add_argument('--buffer-size', type=int, default=100_000,
+                        help='Replay buffer capacity (default: 100000)')
+    parser.add_argument('--target-update-freq', type=int, default=0,
+                        help='Hard target update every N steps (0=soft Polyak, default: 0)')
 
     # Greedy baseline
     parser.add_argument('--greedy', action='store_true',
@@ -304,7 +314,8 @@ def main():
         from src.utils.visualization import run_dqn_eval_and_save
 
         discrete_env = DiscreteActionEnv(env, n_angle=args.n_angle, n_dist=args.n_dist)
-        agent = DQN(state_dim=44, num_actions=discrete_env.max_actions)
+        agent = DQN(state_dim=44, num_actions=discrete_env.max_actions,
+                    target_update_freq=args.target_update_freq)
 
         if args.load_path:
             agent.load_weights(args.load_path)
@@ -320,7 +331,7 @@ def main():
                   f"complete={stats['completed']}")
             return
 
-        replay_buffer = MaskedReplayBuffer(capacity=100_000)
+        replay_buffer = MaskedReplayBuffer(capacity=args.buffer_size)
         domain_max_ep_len = DOMAINS[args.domain].max_ep_len
         trainer = DQNTrainer(
             env=discrete_env, agent=agent, replay_buffer=replay_buffer,

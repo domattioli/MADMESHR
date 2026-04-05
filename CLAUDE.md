@@ -30,11 +30,14 @@ pytest tests/test_discrete_env.py::TestActionEnumeration::test_type0_always_pres
 # Run greedy-by-quality baseline (no training)
 python main.py --domain star --greedy
 
+# Validate all domains (7-point check)
+python scripts/validate_mesh.py
+
 # Analyze quality ceiling for a domain
-python quality_diagnostic.py
+python scripts/quality_diagnostic.py
 ```
 
-Available domains: `square`, `octagon`, `circle`, `star`, `l-shape`, `rectangle`, `h-shape` (20v, 1-unit spacing), `annulus-layer2`
+Available domains: `square`, `octagon`, `circle`, `star`, `l-shape`, `rectangle`, `h-shape` (24v, crossbar y=1.5-2.5), `annulus-layer2`
 
 ## Architecture
 
@@ -51,9 +54,9 @@ main.py (CLI + domain registry)
 
 - **`src/MeshEnvironment.py`** (~1600 lines): Core advancing-front environment. Manages polygon boundary, element formation (`_form_element`), boundary updates (`_update_boundary`, `_update_boundary_type2`), state computation, reward calculation, and geometry utilities (intersection, convexity, point-in-polygon). The continuous action space `[-1,1]^3` maps to element type + vertex placement. Supports multi-loop boundaries via `pending_loops` for type-2 splits. Concave domain validity checks (session 11): `_batch_edges_cross_original_boundary`, `_batch_edges_cross_current_boundary`, `_boundary_has_self_intersection`, `_element_overlaps_existing`.
 
-- **`src/DiscreteActionEnv.py`**: Wraps MeshEnvironment with a Discrete(49) action space. Action 0 = type-0 (connect adjacent vertices). Actions 1-48 = type-1 on a 12-angle × 4-radial grid (interior vertex placement). Provides `info["action_mask"]` boolean array and enriched 44-float state vector.
+- **`src/DiscreteActionEnv.py`**: Wraps MeshEnvironment with a Discrete(57) action space. Action 0 = type-0 (connect adjacent vertices). Actions 1-48 = type-1 on a 12-angle × 4-radial grid (interior vertex placement). Actions 49-56 = type-2 (proximity split actions, up to 8 slots sorted by distance). Provides `info["action_mask"]` boolean array and enriched 44-float state vector. Type-2 reward: `eta_e + 0.3*eta_b + 0.3` (split bonus, no mu penalty). Sub-loop completion bonus: +2.0 when `pending_loop` activates.
 
-- **`src/DQN.py`**: Dueling Double DQN. Architecture: shared trunk → value stream + advantage stream. Q = V + (A - mean_valid(A)). Invalid actions masked to -inf. `MaskedReplayBuffer` stores (state, action, reward, next_state, next_mask, done).
+- **`src/DQN.py`**: Dueling Double DQN. Architecture: shared trunk → value stream + advantage stream. Q = V + (A - mean_valid(A)). Invalid actions masked to -inf. `MaskedReplayBuffer` stores (state, action, reward, next_state, next_mask, done). Supports hard target updates via `target_update_freq` parameter (0=soft Polyak, >0=hard copy every N steps).
 
 - **`src/trainer_dqn.py`**: `DQNTrainer` with linear epsilon decay, periodic eval, best-model checkpointing.
 
@@ -98,4 +101,5 @@ All development sessions must follow the adversarial planning process documented
 - Type-2 boundary split now correctly produces two separate loops (session 10). Annulus oracle: 23Q, q=0.420 (incomplete, stuck at 21 boundary vertices on active loop).
 - DiscreteActionEnv has boundary growth guard (session 10): reverts elements that increase boundary count.
 - Session 11 added 4 concave domain validity checks. All 8 domains pass 7-point validation with zero boundary violations. H-shape DQN (20v): 10Q, q=0.533, 100% completion. L-shape DQN: 2Q, q=0.459.
-- H-shape DQN is unstable past 10k steps on 20v domain — best checkpoint at 10k regresses by 15k. May need longer training or curriculum.
+- H-shape domain updated to 24v (crossbar y=1.5-2.5) in session 12. DQN stability fix applied (hard target updates, smaller buffer, faster epsilon decay). Previous instability on 20v at 10k → regression at 15k.
+- Type-2 DQN actions (slots 49-56) implemented in session 12. Annulus shows 1 type-2 action at initial state. Domains without proximity pairs (square, etc.) mask all type-2 slots. Annulus DQN training deferred to session 13 (completion unreachable during exploration).

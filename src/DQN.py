@@ -42,11 +42,14 @@ class DQN:
     Action masking: Q[invalid] = -inf after Q computation.
     """
 
-    def __init__(self, state_dim=44, num_actions=49, gamma=0.95, tau=0.005, lr=3e-4):
+    def __init__(self, state_dim=44, num_actions=49, gamma=0.95, tau=0.005, lr=3e-4,
+                 target_update_freq=0):
         self.state_dim = state_dim
         self.num_actions = num_actions
         self.gamma = gamma
         self.tau = tau
+        self.target_update_freq = target_update_freq
+        self._train_step_count = 0
 
         self.online_net = self._build_network()
         self.target_net = self._build_network()
@@ -148,9 +151,16 @@ class DQN:
         gradients, _ = tf.clip_by_global_norm(gradients, 10.0)
         self.optimizer.apply_gradients(zip(gradients, self.online_net.trainable_variables))
 
-        # Polyak update target network
-        for target_var, online_var in zip(self.target_net.variables, self.online_net.variables):
-            target_var.assign(self.tau * online_var + (1.0 - self.tau) * target_var)
+        # Update target network
+        self._train_step_count += 1
+        if self.target_update_freq > 0:
+            # Hard copy every N steps (more stable for DQN)
+            if self._train_step_count % self.target_update_freq == 0:
+                self.target_net.set_weights(self.online_net.get_weights())
+        else:
+            # Soft Polyak update every step
+            for target_var, online_var in zip(self.target_net.variables, self.online_net.variables):
+                target_var.assign(self.tau * online_var + (1.0 - self.tau) * target_var)
 
         return {
             'loss': loss.numpy(),

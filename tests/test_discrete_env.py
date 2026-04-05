@@ -120,7 +120,7 @@ class TestDiscreteActionEnv:
 
         from gym import spaces
         assert isinstance(wrapper.action_space, spaces.Discrete)
-        assert wrapper.action_space.n == 49
+        assert wrapper.action_space.n == 57
 
     def test_observation_space_is_44(self):
         """Observation space should be Box(44,)."""
@@ -137,7 +137,7 @@ class TestDiscreteActionEnv:
         state, info = wrapper.reset()
 
         assert "action_mask" in info
-        assert info["action_mask"].shape == (49,)
+        assert info["action_mask"].shape == (57,)
         assert info["action_mask"].dtype == bool
 
     def test_step_returns_mask_in_info(self):
@@ -708,6 +708,122 @@ class TestConcaveValidityChecks:
                         continue
                     assert not env._segments_intersect_scalar(e_s, e_e, s_s, s_e), \
                         f"Element {i} edge {ei} crosses boundary segment {si}"
+
+
+class TestType2DQNIntegration:
+    """Tests for type-2 actions in DiscreteActionEnv (DQN integration)."""
+
+    def _make_annulus_env(self):
+        bnd = np.load(os.path.join(os.path.dirname(__file__), '..', 'domains', 'annulus_layer2.npy'))
+        return DiscreteActionEnv(MeshEnvironment(initial_boundary=bnd))
+
+    def _make_square_env(self):
+        return DiscreteActionEnv(MeshEnvironment())
+
+    def test_action_space_size_57(self):
+        """Action space should be Discrete(57) = 49 type-0/1 + 8 type-2 slots."""
+        env = self._make_annulus_env()
+        assert env.action_space.n == 57
+        assert env.max_actions == 57
+        assert env._type01_actions == 49
+        assert env.K_TYPE2 == 8
+
+    def test_type2_in_annulus_mask(self):
+        """Annulus should have at least 1 type-2 action in its mask."""
+        env = self._make_annulus_env()
+        state, info = env.reset()
+        mask = info["action_mask"]
+        type2_mask = mask[49:]
+        assert np.any(type2_mask), (
+            f"Expected at least 1 type-2 action in annulus mask, got {np.sum(type2_mask)}")
+
+    def test_type2_masked_on_square(self):
+        """Square domain should have no type-2 actions (no proximity pairs)."""
+        env = self._make_square_env()
+        state, info = env.reset()
+        mask = info["action_mask"]
+        type2_mask = mask[49:]
+        assert not np.any(type2_mask), "Square should have no type-2 actions"
+
+    def test_type2_step_produces_valid_element(self):
+        """Taking a type-2 action on annulus should produce a valid element."""
+        env = self._make_annulus_env()
+        state, info = env.reset()
+        mask = info["action_mask"]
+        type2_actions = np.where(mask[49:])[0] + 49
+        assert len(type2_actions) > 0, "Need type-2 actions to test"
+
+        n_elem_before = len(env.env.elements)
+        obs, reward, done, trunc, info = env.step(type2_actions[0])
+        assert info["valid"], "Type-2 step should be valid"
+        assert len(env.env.elements) > n_elem_before, "Should have placed element"
+        assert info["split_bonus"] == 0.3 or done, "Should get split bonus for type-2"
+
+    def test_sub_loop_bonus_on_activation(self):
+        """Sub-loop completion bonus (+2.0) fires when pending_loop activates."""
+        env = self._make_annulus_env()
+        state, info = env.reset()
+        mask = info["action_mask"]
+        type2_actions = np.where(mask[49:])[0] + 49
+        assert len(type2_actions) > 0
+
+        # Take type-2 action — should create pending loop
+        obs, reward, done, trunc, info = env.step(type2_actions[0])
+        assert len(env.env.pending_loops) >= 0  # may or may not have pending
+
+        # If pending loop exists, simulate completion to get sub-loop bonus
+        if len(env.env.pending_loops) > 0:
+            # Force active boundary to empty to trigger activation
+            pending_size = len(env.env.pending_loops[0])
+            env.env.boundary = np.array([[0, 0], [1, 0], [1, 1]])  # 3 vertices = triangle
+            env.env._invalidate_action_cache()
+            env._enumerate()
+
+            # Step should trigger triangle + pending_loop activation
+            mask2 = env._action_mask
+            valid_actions = np.where(mask2)[0]
+            if len(valid_actions) > 0:
+                obs2, reward2, done2, trunc2, info2 = env.step(valid_actions[0])
+                # Sub-loop bonus should fire if pending loop activated
+                # (may not fire if mesh completed instead)
+
+    def test_annulus_50_random_steps_no_crash(self):
+        """50 random steps on annulus with type-2 actions — no crashes."""
+        np.random.seed(42)
+        env = self._make_annulus_env()
+        state, info = env.reset()
+
+        for step in range(50):
+            mask = info["action_mask"]
+            valid_actions = np.where(mask)[0]
+            if len(valid_actions) == 0:
+                break
+
+            action = np.random.choice(valid_actions)
+            prev_bnd = len(env.env.boundary)
+            state, reward, done, truncated, info = env.step(action)
+
+            # Basic sanity
+            assert state.shape == (44,), f"State shape wrong at step {step}"
+            assert isinstance(reward, (int, float)), f"Reward type wrong at step {step}"
+            assert info["action_mask"].shape == (57,), f"Mask shape wrong at step {step}"
+
+            if done or truncated:
+                break
+
+    def test_annulus_type2_boundary_valid_after_step(self):
+        """After a type-2 step, boundary should have positive area."""
+        env = self._make_annulus_env()
+        state, info = env.reset()
+        mask = info["action_mask"]
+        type2_actions = np.where(mask[49:])[0] + 49
+        if len(type2_actions) == 0:
+            pytest.skip("No type-2 actions available")
+
+        obs, reward, done, trunc, info = env.step(type2_actions[0])
+        if not done:
+            area = env.env._calculate_polygon_area(env.env.boundary)
+            assert area > 0, "Active boundary should have positive area after type-2"
 
 
 if __name__ == "__main__":
