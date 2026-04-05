@@ -14,28 +14,20 @@ from madmeshr.discrete_action_env import DiscreteActionEnv
 from madmeshr.dqn import DQN
 
 
-# Domain boundary constructors (from main.py)
+# Domain boundary constructors (import from main.py to avoid duplication/drift)
+from main import DOMAINS
+
 def make_octagon():
-    angles = np.linspace(0, 2*np.pi, 9)[:-1]
-    return np.column_stack([np.cos(angles), np.sin(angles)])
+    return DOMAINS['octagon']()
 
 def make_star():
-    angles = np.linspace(0, 2*np.pi, 11)[:-1]
-    radii = [1.0 if i % 2 == 0 else 0.5 for i in range(10)]
-    x = [r * np.cos(a) for r, a in zip(radii, angles)]
-    y = [r * np.sin(a) for r, a in zip(radii, angles)]
-    return np.column_stack([x, y])
+    return DOMAINS['star']()
 
 def make_circle():
-    angles = np.linspace(0, 2*np.pi, 17)[:-1]
-    return np.column_stack([np.cos(angles), np.sin(angles)])
+    return DOMAINS['circle']()
 
 def make_rectangle():
-    bottom = [(i * 0.5, 0.0) for i in range(7)]
-    right = [(3.0, j * 0.5) for j in range(1, 4)]
-    top = [(3.0 - i * 0.5, 1.5) for i in range(7)]
-    left = [(0.0, 1.5 - j * 0.5) for j in range(1, 4)]
-    return np.array(bottom + right + top + left)
+    return DOMAINS['rectangle']()
 
 
 # (boundary_fn, checkpoint_path, num_actions_at_training_time, n_angle, n_dist)

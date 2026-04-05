@@ -97,7 +97,7 @@ def _try_place_element(env, elem, update_fn, orig_boundary, verbose_tag="", verb
     return True
 
 
-def run_oracle(max_steps=200, verbose=True):
+def run_oracle(max_steps=200, verbose=True, type2_threshold=0.10):
     bnd = np.load(os.path.join(os.path.dirname(__file__), '..', "domains", "annulus_layer2.npy"))
     env = MeshEnvironment(initial_boundary=bnd)
     env.reset()
@@ -165,7 +165,7 @@ def run_oracle(max_steps=200, verbose=True):
         best_type2_quality = -1
 
         for i in range(n):
-            pairs = env._find_proximity_pairs(i, threshold=0.02, min_gap=3)
+            pairs = env._find_proximity_pairs(i, threshold=type2_threshold, min_gap=3)
             for far_idx, dist in pairs:
                 for ref, far in [(i, far_idx), (far_idx, i)]:
                     elem, consumed = env._form_type2_element(ref, far)

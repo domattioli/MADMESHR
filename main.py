@@ -27,12 +27,14 @@ from madmeshr.mesh_environment import MeshEnvironment
 DOMAINS = {}
 
 
-def register_domain(name, description, max_ep_len=20, type0_priority=False):
+def register_domain(name, description, max_ep_len=20, type0_priority=False, bnd_dist_threshold=0.03, type2_threshold=0.02):
     """Decorator to register a domain factory function."""
     def decorator(fn):
         fn.description = description
         fn.max_ep_len = max_ep_len
         fn.type0_priority = type0_priority
+        fn.bnd_dist_threshold = bnd_dist_threshold
+        fn.type2_threshold = type2_threshold
         DOMAINS[name] = fn
         return fn
     return decorator
@@ -98,7 +100,7 @@ def _make_h_shape():
     ], dtype=float)
 
 
-@register_domain("annulus-layer2", "64-vertex non-convex subdomain from CHILmesh annulus layer 2", max_ep_len=70)
+@register_domain("annulus-layer2", "64-vertex non-convex subdomain from CHILmesh annulus layer 2", max_ep_len=70, type2_threshold=0.10)
 def _make_annulus_layer2():
     import os
     return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_layer2.npy"))
@@ -231,20 +233,20 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_greedy(boundary, domain_name, n_angle=12, n_dist=4, type0_priority=False):
+def run_greedy(boundary, domain_name, n_angle=12, n_dist=4, type0_priority=False, bnd_dist_threshold=0.03, type2_threshold=0.02):
     """Run a greedy-by-quality rollout and save visualization."""
     from madmeshr.discrete_action_env import DiscreteActionEnv
     from madmeshr.utils.visualization import save_mesh_result
 
-    env = MeshEnvironment(initial_boundary=boundary, type0_priority=type0_priority)
-    discrete_env = DiscreteActionEnv(env, n_angle=n_angle, n_dist=n_dist)
+    env = MeshEnvironment(initial_boundary=boundary, type0_priority=type0_priority, bnd_dist_threshold=bnd_dist_threshold)
+    discrete_env = DiscreteActionEnv(env, n_angle=n_angle, n_dist=n_dist, type2_threshold=type2_threshold)
 
     state, info = discrete_env.reset()
     done = False
     steps = 0
     total_reward = 0
 
-    while not done and steps < 30:
+    while not done and steps < 100:
         mask = info["action_mask"]
         valid_indices = np.where(mask)[0]
         if len(valid_indices) == 0:
@@ -254,14 +256,25 @@ def run_greedy(boundary, domain_name, n_angle=12, n_dist=4, type0_priority=False
         best_action = None
         best_quality = -1
         ref_vertex = env._cached_ref_vertex
+        n_type01 = discrete_env._type01_actions
         for action_idx in valid_indices:
-            action_type, new_vertex = discrete_env._valid_actions[action_idx]
-            element, valid = env._form_element(ref_vertex, action_type, new_vertex)
-            if valid and len(element) == 4:
-                q = env._calculate_element_quality(element)
-                if q > best_quality:
-                    best_quality = q
-                    best_action = action_idx
+            action_type, action_data = discrete_env._valid_actions[action_idx]
+            if action_type == 2:
+                # Type-2: evaluate directly via _form_type2_element
+                ref_idx, far_idx = action_data
+                elem, consumed = env._form_type2_element(ref_idx, far_idx)
+                if elem is not None:
+                    q = env._calculate_element_quality(elem)
+                    if q > best_quality:
+                        best_quality = q
+                        best_action = action_idx
+            else:
+                element, valid = env._form_element(ref_vertex, action_type, action_data)
+                if valid and len(element) == 4:
+                    q = env._calculate_element_quality(element)
+                    if q > best_quality:
+                        best_quality = q
+                        best_action = action_idx
 
         if best_action is None:
             # No quad actions — take first valid
@@ -303,12 +316,14 @@ def main():
     domain_fn = DOMAINS[args.domain]
     boundary = domain_fn()
     type0_prio = getattr(domain_fn, 'type0_priority', False)
-    env = MeshEnvironment(initial_boundary=boundary, type0_priority=type0_prio)
-    print(f"Domain: {args.domain} ({len(boundary)} vertices, type0_priority={type0_prio})")
+    bnd_dist_th = getattr(domain_fn, 'bnd_dist_threshold', 0.03)
+    type2_th = getattr(domain_fn, 'type2_threshold', 0.02)
+    env = MeshEnvironment(initial_boundary=boundary, type0_priority=type0_prio, bnd_dist_threshold=bnd_dist_th)
+    print(f"Domain: {args.domain} ({len(boundary)} vertices, type0_priority={type0_prio}, bnd_dist_threshold={bnd_dist_th}, type2_threshold={type2_th})")
 
     if args.greedy:
         run_greedy(boundary, args.domain, n_angle=args.n_angle, n_dist=args.n_dist,
-                   type0_priority=type0_prio)
+                   type0_priority=type0_prio, bnd_dist_threshold=bnd_dist_th, type2_threshold=type2_th)
         return
 
     if args.algorithm == 'dqn':
@@ -317,7 +332,7 @@ def main():
         from madmeshr.trainer_dqn import DQNTrainer
         from madmeshr.utils.visualization import run_dqn_eval_and_save
 
-        discrete_env = DiscreteActionEnv(env, n_angle=args.n_angle, n_dist=args.n_dist)
+        discrete_env = DiscreteActionEnv(env, n_angle=args.n_angle, n_dist=args.n_dist, type2_threshold=type2_th)
         agent = DQN(state_dim=44, num_actions=discrete_env.max_actions,
                     target_update_freq=args.target_update_freq)
 
@@ -329,7 +344,8 @@ def main():
             stats = run_dqn_eval_and_save(
                 agent, boundary, args.domain,
                 n_angle=args.n_angle, n_dist=args.n_dist,
-                type0_priority=type0_prio)
+                type0_priority=type0_prio, bnd_dist_threshold=bnd_dist_th,
+                type2_threshold=type2_th)
             print(f"Eval: return={stats['return']:.2f} | "
                   f"quality={stats['mean_quality']:.3f} | "
                   f"elements={stats['n_elements']} ({stats['n_quads']}Q+{stats['n_triangles']}T) | "
@@ -355,7 +371,7 @@ def main():
         stats = run_dqn_eval_and_save(
             agent, boundary, args.domain,
             n_angle=args.n_angle, n_dist=args.n_dist,
-            type0_priority=type0_prio)
+            type0_priority=type0_prio, bnd_dist_threshold=bnd_dist_th)
         print(f"\nFinal eval: return={stats['return']:.2f} | "
               f"quality={stats['mean_quality']:.3f} | "
               f"elements={stats['n_elements']} ({stats['n_quads']}Q+{stats['n_triangles']}T) | "

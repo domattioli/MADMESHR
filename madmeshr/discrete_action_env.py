@@ -21,10 +21,11 @@ class DiscreteActionEnv(gym.Wrapper):
     K_TYPE2 = 8  # max type-2 action slots
 
     def __init__(self, env: MeshEnvironment, n_angle: int = 12, n_dist: int = 4,
-                 no_valid_penalty: float = -2.0):
+                 no_valid_penalty: float = -2.0, type2_threshold: float = 0.02):
         super().__init__(env)
         self.n_angle = n_angle
         self.n_dist = n_dist
+        self.type2_threshold = type2_threshold
         self._type01_actions = 1 + n_angle * n_dist  # 49
         self.max_actions = self._type01_actions + self.K_TYPE2  # 57
         self.no_valid_penalty = no_valid_penalty
@@ -282,7 +283,7 @@ class DiscreteActionEnv(gym.Wrapper):
         seen_pairs = set()
         all_type2 = []
         for i in range(len(self.env.boundary)):
-            for far_idx, dist in self.env._find_proximity_pairs(i, threshold=0.02, min_gap=3):
+            for far_idx, dist in self.env._find_proximity_pairs(i, threshold=self.type2_threshold, min_gap=3):
                 pair_key = (min(i, far_idx), max(i, far_idx))
                 if pair_key in seen_pairs:
                     continue

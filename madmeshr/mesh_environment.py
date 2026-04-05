@@ -14,7 +14,7 @@ from typing import List, Tuple, Dict, Optional, Union, Any
 __all__ = ['MeshEnvironment']
 
 class MeshEnvironment(gym.Env):
-    def __init__(self, initial_boundary=None, interior_points=None, type0_priority=False):
+    def __init__(self, initial_boundary=None, interior_points=None, type0_priority=False, bnd_dist_threshold=0.03):
         # Initialize domain boundary
         if initial_boundary is None:
             self.initial_boundary = np.array([
@@ -26,6 +26,7 @@ class MeshEnvironment(gym.Env):
         # Type-0 priority: scan all vertices for best type-0 action before angle-based selection.
         # Helps concave domains (H-shape) but hurts convex domains. Default OFF.
         self.type0_priority = type0_priority
+        self.bnd_dist_threshold = bnd_dist_threshold
 
         # Interior points (optional)
         self.interior_points = interior_points if interior_points is not None else np.array([[0, 0]])
@@ -1208,7 +1209,7 @@ class MeshEnvironment(gym.Env):
 
         # --- Reject candidates too close to any boundary edge ---
         # Prevents near-degenerate elements from interior vertices on boundary walls
-        min_dist_threshold = 0.03 * radius  # scale by fan radius
+        min_dist_threshold = self.bnd_dist_threshold * radius  # scale by fan radius
         pip_indices_close = np.where(pip_mask)[0]
         if len(pip_indices_close) > 0:
             bnd_starts = self.boundary
