@@ -74,7 +74,6 @@ class DiscreteActionEnv(gym.Wrapper):
                 return self._fail_step()
         else:
             new_vertex = action_data
-            # Use the same reference vertex that enumerate used
             ref_vertex = self.env._cached_ref_vertex
             if ref_vertex is None:
                 ref_vertex = self.env._select_reference_vertex()
@@ -168,8 +167,10 @@ class DiscreteActionEnv(gym.Wrapper):
                 done = True
         elif bnd_len == 4:
             bnd_quad = np.array(self.env.boundary)
-            # Accept any non-self-intersecting quad (convex or concave)
-            if not self.env._has_self_intersection(bnd_quad):
+            centroid = np.mean(bnd_quad, axis=0)
+            centroid_ok = self.env._point_in_polygon(centroid, self.env.initial_boundary)
+            # Accept non-self-intersecting quad with centroid inside domain
+            if not self.env._has_self_intersection(bnd_quad) and centroid_ok:
                 quality_final = self.env._calculate_element_quality(bnd_quad)
                 self.env.elements.append(bnd_quad)
                 self.env.element_qualities.append(quality_final)

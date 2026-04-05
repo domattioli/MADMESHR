@@ -1053,6 +1053,12 @@ class MeshEnvironment(gym.Env):
     def enumerate_valid_actions(self, n_angle=12, n_dist=4):
         """Enumerate all valid discrete actions for the current boundary state.
 
+        Vertex selection: prioritize vertices where type-0 produces a valid,
+        high-quality quad. This ensures type-0 (boundary consumption) is
+        available when possible, reducing total element count.
+
+        Fallback: if no vertex has valid type-0, use smallest-angle vertex.
+
         Returns:
             actions: list of (action_type, new_vertex_or_None) tuples
             mask: boolean np.array of shape (1 + n_angle*n_dist,)
@@ -1061,9 +1067,38 @@ class MeshEnvironment(gym.Env):
             return self._cached_actions
 
         max_actions = 1 + n_angle * n_dist
+        n_bnd = len(self.boundary)
 
-        # Try vertices in order of increasing interior angle (fallback logic)
+        # Phase 1: find the best type-0 across all vertices
+        best_type0_idx = -1
+        best_type0_q = -1.0
+        if n_bnd >= 4:
+            for i in range(n_bnd):
+                elem, valid = self._form_element_fast(self.boundary[i], 0, None, i)
+                if not valid or elem is None or len(elem) != 4:
+                    continue
+                eq = np.array(elem).reshape(1, 4, 2)
+                if self._batch_edges_cross_original_boundary(eq)[0]:
+                    continue
+                if self._batch_edges_cross_current_boundary(eq, i)[0]:
+                    continue
+                centroid = np.mean(elem, axis=0)
+                if not self._point_in_polygon(centroid, self.initial_boundary):
+                    continue
+                if self._element_overlaps_existing(elem):
+                    continue
+                q = self._calculate_element_quality(elem)
+                if q > best_type0_q:
+                    best_type0_q = q
+                    best_type0_idx = i
+
+        # Phase 2: build vertex order — best type-0 vertex first, then by angle
         vertex_order = self._get_vertices_by_angle()
+        if best_type0_idx >= 0:
+            best_v = self.boundary[best_type0_idx].copy()
+            # Move best type-0 vertex to front
+            vertex_order = [best_v] + [v for v in vertex_order
+                                        if not np.allclose(v, best_v, atol=1e-10)]
 
         for ref_vertex in vertex_order:
             actions, mask = self._enumerate_for_vertex(ref_vertex, n_angle, n_dist, max_actions)
@@ -1076,8 +1111,8 @@ class MeshEnvironment(gym.Env):
         # No vertex yields valid actions — return all-False mask
         actions = [(0, None)] + [(1, None)] * (n_angle * n_dist)
         mask = np.zeros(max_actions, dtype=bool)
-        self._cached_ref_vertex = vertex_order[0].copy() if vertex_order else None
-        self._cached_ref_idx = self._find_vertex_index(vertex_order[0]) if vertex_order else -1
+        self._cached_ref_vertex = vertex_order[0].copy() if len(vertex_order) > 0 else None
+        self._cached_ref_idx = self._find_vertex_index(vertex_order[0]) if len(vertex_order) > 0 else -1
         self._cached_actions = (actions, mask)
         return actions, mask
 
