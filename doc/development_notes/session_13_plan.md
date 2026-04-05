@@ -1,4 +1,4 @@
-# Session 13 Plan: Annulus DQN Training + Domain Retraining
+# Session 13 Plan: Retrain Existing Domains with Session 12 Fixes
 
 **Date:** Next session after session 12
 **Status:** Final (multi-agent reviewed)
@@ -6,227 +6,160 @@
 
 ## Context
 
-Session 12 implemented type-2 DQN architecture (Discrete(57) = 49 type-0/1 + 8 type-2 slots), revised H-shape to 24v (crossbar y=1.5-2.5), and most importantly fixed two critical issues: (1) mu calibration -- A_min/A_max now scaled by expected element count, and (2) type-0 priority vertex selection. These two fixes turned H-shape from 0% completion to optimal 11Q q=0.677 (confirmed by oracle). The H-shape is now fully solved and stable.
-
-Session 12 also added DQN stability fixes (hard target updates every 500 steps, 20k buffer, epsilon_decay_frac=0.5), boundary distance filter, centroid check on auto-close, project reorganization (scripts/, pyproject.toml, __init__.py), and grew tests from 37 to 44.
-
-Type-2 actions are enumerated from all boundary proximity pairs (threshold=0.02), validated with Check A/B, sorted by distance. Annulus shows 1 type-2 action at initial state (only 1 of 7 pairs passes validation). Annulus oracle (greedy type-2 + type-0): 23Q, q=0.420, incomplete (stuck at 21 boundary vertices on active loop).
+Session 12 made three changes that could improve existing domains:
+1. **Mu calibration**: A_min/A_max scaled by expected element count. On H-shape 24v, this eliminated the mu-avoidance trap.
+2. **Type-0 priority vertex selection**: Scans all vertices for the best type-0 before angle-based selection. Reduced H-shape from 15Q to 11Q (optimal). Adds ~2x per-step overhead.
+3. **Boundary distance filter**: Rejects interior vertices too close to boundary edges.
 
 ### Adversarial Review Summary
 
-Three agents reviewed the original version of this plan over 1 round:
+Three agents reviewed this plan:
 
 **Devil's Advocate** attacked:
-1. CRITICAL: Oracle is incomplete -- sub-loop from bad type-2 split may be unmeshable -> **Accepted**: added sub-loop completability verification before training
-2. CRITICAL: WS1/WS2 have circular dependency -> **Accepted**: reordered threshold tuning before training
-3. MAJOR: 30k steps likely insufficient for 30v+ sub-loop -> **Accepted**: 10k decision gate + kill early
-4. MAJOR: Sub-loop bonus (+2.0) may be too weak for farming prevention -> **Partially accepted**: reward analyst confirmed +2.0 is adequate for 20v sub-loop; start with smaller sub-loop
-5. MINOR: Test targets vague -> **Accepted**: named specific tests
-6. MINOR: Triangle fallback not mentioned -> **Accepted**: verify enabled in curriculum
+1. Type-0 priority validated on only H-shape — could hurt convex domains -> **Accepted**: WS1 eval must log per-step actions, not just final quality. Add ablation.
+2. Plan's A_max arithmetic for rectangle was wrong (said 0.200, actual is 0.200 but double-check code) -> **Accepted**: verify in WS1
+3. 15k/20k step budgets extrapolated from single data point -> **Accepted**: decision gates at 5k and 10k, not just 10k
+4. Star retraining is waste — at ceiling, mu unchanged -> **Accepted**: star CUT from WS2
+5. No ablation to separate mu vs type-0 effects -> **Accepted**: run one domain with type-0 disabled as control
+6. Success criteria within noise without multiple seeds -> **Accepted**: raise targets or run 3 seeds
+7. Rectangle per-step time makes 20k infeasible -> **Accepted**: cap at 7.5k (see scope realist)
 
 **Scope Realist** computed:
-- WS1 Step 1 (curriculum impl) estimated 20 min but realistic: 45-60 min -> **Accepted**: timeboxed at 45 min with hardcoded boundary fallback
-- Total realistic: 165-225 min, borderline for 3h -> **Accepted**: cut WS2 optimization, only profile
-- Hidden dependency: threshold tuning informs curriculum design -> **Accepted**: reordered
-- Design question: fixed vs random sub-loop for training -> **Accepted**: resolved (fixed start, randomize later)
+- Rectangle at ~0.8s/step: 20k = 4.4 hours (impossible) -> **Accepted**: cap at 7.5k, treat as stretch goal
+- Star cut saves 45 min -> **Accepted**
+- Total realistic: ~200 min (3.3h) still tight -> **Accepted**: WS1 is hard decision gate; skip retraining if eval shows no change
+- validate_mesh takes 2-3 min with type-0 scan -> **Accepted**: budget for it
 
-**Reward Analyst** found:
-1. 40v sub-loop: completion/farming ratio ~1.0x (borderline). 20v sub-loop: ratio ~2.5x (healthy) -> **Accepted**: train on smaller sub-loop first
-2. original_area MUST reset to sub-loop area or mu will be miscalibrated -> **Accepted**: added as critical implementation check
-3. Sub-loop completion bonus (+2.0) is well-calibrated -> **Accepted**
-4. max_ep_len should be ~25 for sub-loop (not 70) -> **Accepted**
-5. Reward farming controlled by mu, but only if original_area is correct -> **Accepted**: added verification
+**Reward Analyst** proved quantitatively:
+- **Mu is 0 for typical elements in ALL four domains under both old and new calibration** -> Changes expectation: mu fix is NOT the driver for these domains
+- Octagon gap (0.478 vs 0.61) is action-space limited, not mu -> **Accepted**: type-0 priority is the only lever; if it doesn't help, the gap requires action space changes
+- Star: mu unchanged, quality at ceiling -> **Accepted**: confirms star is cut
+- No regression risk from mu changes -> **Accepted**: removes concern about circle/rectangle
 
-**Post-review update:** The H-shape stability issue flagged in the original plan (Step 0) has been fully resolved in session 12. The mu calibration fix and type-0 priority vertex selection brought H-shape from 0% to optimal 11Q q=0.677. Step 0 is no longer needed -- these fixes should also benefit annulus sub-loop training.
+**Bottom line:** The mu fix is irrelevant for existing domains (mu=0 for all typical elements). The ONLY change that could improve quality is type-0 priority vertex selection. This was validated on one domain (H-shape). The plan is now a focused test of whether type-0 priority generalizes.
 
-## Design Decisions (resolved per reviews)
-
-### Curriculum Strategy
-- Train on the **smaller sub-loop** (~20v, not 40v) -- reward ratio is 2.5x, healthy for learning
-- Fixed start state (deterministic type-2 pre-placement) for initial training
-- max_ep_len = 25 for sub-loop curriculum
-- `original_area` MUST be set to the sub-loop polygon area, not the full annulus area
-- The mu calibration fix (session 12) now scales A_min/A_max by expected element count, which should make sub-loop mu penalties well-calibrated automatically
-
-### Threshold Tuning Strategy
-- Test thresholds: 0.01, 0.02, 0.05, 0.10 on annulus
-- Pick threshold that gives >= 3 valid type-2 actions at initial state
-- All thresholds must pass 7-point validation
-
-## Workstreams (4, strict priority order)
+## Workstreams (3, strict priority order)
 
 ---
 
-### WS1: Type-2 Threshold Tuning + Sub-Loop Verification (Priority 1, ~40 min)
+### WS1: Evaluate + Ablation Under New Code (Priority 1, ~35 min)
 
-**Problem:** Only 1 of 7 annulus proximity pairs passes validation at threshold=0.02. The resulting split may produce an unmeshable sub-loop.
+**Problem:** Type-0 priority changes action enumeration for all domains. Need to verify no regressions and measure the effect.
 
-**Step 1: Threshold sensitivity sweep (15 min)**
-- Test thresholds: 0.01, 0.02, 0.05, 0.10 on annulus
-- For each: count valid type-2 actions at initial state
-- Run 7-point validation on any threshold that produces new valid actions
-- Pick threshold with >= 3 valid type-2 actions AND clean validation
+**Step 1: Eval all domains with new code (15 min)**
+- Load best checkpoint for each non-trivial domain: octagon, star, circle, rectangle
+- Run eval-only under new code
+- Log: completion %, element count, quality, per-step action types
+- Compare to session 11 baselines
 
-**Step 2: Verify sub-loop completability (15 min)**
-- For each valid type-2 action at chosen threshold:
-  - Execute type-2, get the two sub-loops
-  - Run greedy oracle on each sub-loop independently
-  - Record: completable? element count? quality?
-- Select the type-2 split that produces the most completable sub-loops
+**Step 2: Greedy baselines (10 min)**
+- Run greedy-by-quality on octagon, rectangle with new code
+- Compare to old greedy baselines
+- Do greedy element counts change?
 
-**Step 3: Profile type-2 enumerate overhead (10 min)**
-- Measure enumerate time on annulus with and without type-2 at chosen threshold
-- If > 2x overhead: log it, defer optimization to session 14
-- If <= 2x: no action needed
+**Step 3: Type-0 priority ablation (10 min)**
+- Temporarily disable type-0 priority (revert to angle-based selection)
+- Re-eval octagon and rectangle
+- Does the old vertex selection produce the same quality? If yes, type-0 priority is not helping these domains.
 
-**Verification:**
-- Threshold chosen with >= 3 valid type-2 actions on annulus
-- At least 1 sub-loop from chosen split is completable by greedy
-- 7-point validation passes at new threshold
-- Enumerate overhead measured and logged
+**Decision gate:** If eval shows:
+- No quality change for any domain -> type-0 priority doesn't generalize. Retrain with larger action space (24x8) instead. Proceed to WS3 docs.
+- Quality improved for >= 1 domain -> retrain that domain in WS2.
+- Quality regressed for any domain -> investigate before retraining.
 
-**Files:** `src/DiscreteActionEnv.py` (threshold param), `src/MeshEnvironment.py`
+**Files:** `main.py` (eval-only), `src/MeshEnvironment.py` (ablation toggle)
 
 ---
 
-### WS2: Annulus Sub-Loop Curriculum Training (Priority 2, ~90 min)
+### WS2: Retrain Priority Domains (Priority 2, ~120 min)
 
-**Problem:** Annulus completion is unreachable during random exploration. Curriculum approach: pre-place type-2 element to create smaller sub-loops, train DQN on the manageable sub-loop.
+**Proceed only if WS1 shows potential improvement.**
 
-**Note:** The mu calibration fix (session 12) and type-0 priority vertex selection should significantly help convergence. H-shape went from 0% to optimal with these fixes.
+**Training order (by expected impact):**
+1. **Octagon** (8v): Largest quality gap (0.478 vs 0.61 ceiling). 15k steps (~50 min with type-0 scan).
+   - Decision gate at 5k: if quality <= 0.48, kill.
+   - Target: q >= 0.55 (well above noise)
+2. **Rectangle** (20v): 7.5k steps (~100 min with type-0 scan). Stretch goal — only if octagon succeeds AND time remains.
+   - Decision gate at 5k: if quality <= 0.47, kill.
+   - Target: element count < 9 (currently 9Q)
 
-**Step 1: Implement curriculum reset (45 min, timeboxed)**
-- Add curriculum domain option that:
-  1. Resets annulus boundary
-  2. Executes the pre-selected type-2 action deterministically
-  3. Extracts the smaller sub-loop as the training boundary
-  4. Sets `original_area` to the sub-loop polygon area (CRITICAL for mu calibration)
-  5. Sets max_ep_len = 25
-- **Fallback if timeboxed:** hardcode the post-split boundary vertices as a static domain
+**Star is CUT** (per all three reviewers: at ceiling, mu unchanged, pointless).
 
-**Step 2: Verify curriculum (5 min)**
-- Reset curriculum domain, check:
-  - Boundary is the smaller sub-loop
-  - Action mask has valid type-0/type-1 actions
-  - original_area matches sub-loop area
-  - Triangle fallback is enabled
+**Hyperparameters:**
+- `--epsilon-decay-frac 0.5 --buffer-size 20000 --target-update-freq 500`
 
-**Step 3: Train DQN on sub-loop (35 min)**
-- 30k steps, same hyperparams as session 12 final (hard target updates/500, 20k buffer, eps_decay_frac=0.5)
-- **Decision gate at 10k:** if 0% completion, investigate:
-  - Is the sub-loop completable at all?
-  - Is the episode too long?
-  - Kill and diagnose rather than burning remaining time
-- **Decision gate at 20k:** if < 30% completion, kill and reduce sub-loop size
+**Alternative if type-0 priority doesn't help:**
+- Try larger action space (24 angles x 8 radial = 192 type-1 actions) on octagon
+- This addresses the action-space limitation identified by the reward analyst
 
-**Step 4: Full annulus test (5 min)**
-- If sub-loop DQN achieves >= 50% completion:
-  - Test: oracle type-2 + DQN sub-loops on full annulus
-  - Record: complete? quality?
+**Cannot run parallel training** (OOM on RTX 3060).
 
 **Verification:**
-- Sub-loop DQN: >= 50% completion, q >= 0.30
-- Full annulus with oracle type-2 + DQN: >= 1 complete mesh (stretch)
-
-**Files:** `main.py` (curriculum domain), `src/DiscreteActionEnv.py`
-
----
-
-### WS3: Retrain Other Domains with Mu Fix + Type-0 Priority (Priority 3, ~40 min)
-
-**Problem:** The mu calibration fix and type-0 priority vertex selection were added after existing domains were last trained. Star (q=0.44), octagon (q=0.61), circle (q=0.78), and rectangle (q=0.464) may benefit from these improvements.
-
-**Step 1: Quick evaluation of existing checkpoints (10 min)**
-- Evaluate current best checkpoints for star, octagon, circle, rectangle under the new code
-- Record completion % and quality -- some may have changed just from the code changes
-
-**Step 2: Retrain domains that could improve (30 min)**
-- Priority order: star (most gap below ceiling), octagon, rectangle
-- 15k steps each with session 12 hyperparams
-- **Decision gate:** if first domain shows no improvement at 10k, skip remaining and move to WS4
-- Do NOT run parallel training (OOM on RTX 3060)
-
-**Verification:**
-- At least 1 domain shows quality improvement over session 11 baselines
+- At least 1 domain shows quality improvement above noise (delta > 0.03)
 - All retrained domains maintain 100% completion
-
-**Files:** `main.py`, checkpoint directories
+- All domains pass 7-point validation
 
 ---
 
-### WS4: Documentation (Priority 4, ~15 min)
+### WS3: Documentation + Next Steps (Priority 3, ~15 min)
 
 **Steps:**
 1. Write session_13_report.md
-2. Write session_14_plan.md (adversarial review)
-3. Push all images
-4. Name specific new tests:
-   - test_curriculum_reset_produces_valid_sub_loop
-   - test_threshold_sweep_valid_elements
-   - test_sub_loop_original_area_correct
-
-**NO training in WS4.**
+2. Run 7-point validation on all domains
+3. Push images to output/latest/
+4. Update CLAUDE.md with new baselines
+5. Plan session 14 (adversarial review) — choose between:
+   - **Option B**: Pan et al. benchmark domain comparison
+   - **Option C**: Annulus type-2 curriculum training
+   - **Option D**: Larger action space (24x8) for octagon if type-0 priority didn't help
 
 ---
 
 ## Execution Order
 
 ```
-WS1: Threshold Tuning + Sub-Loop Verification (40 min)
+WS1: Eval + Ablation (35 min)
   |
-  +-- Threshold sweep (15 min)
-  +-- Sub-loop completability check (15 min)
-  +-- Profile enumerate overhead (10 min)
+  +-- Eval all domains under new code (15 min)
+  +-- Greedy baselines (10 min)
+  +-- Type-0 priority ablation (10 min)
   |
   DECISION GATE:
-    >= 3 type-2 actions AND completable sub-loop -> WS2
-    No completable sub-loop -> increase threshold, try again
-    Still no -> defer annulus to session 14, work on WS3 instead
+    Improvement found -> WS2 (retrain that domain)
+    No improvement -> Skip WS2, explore larger action space or Pan et al.
+    Regression found -> Investigate, potentially revert type-0 priority for that domain
   |
-WS2: Annulus Sub-Loop Training (90 min)
+WS2: Retrain (120 min, conditional)
   |
-  +-- Curriculum implementation (45 min, timeboxed)
-  +-- Verify curriculum (5 min)
-  +-- Train 30k with 10k/20k decision gates (35 min)
-  +-- Full annulus test if sub-loop works (5 min)
+  +-- Octagon 15k (50 min) with 5k decision gate
+  +-- Rectangle 7.5k (100 min, stretch) with 5k decision gate
   |
-WS3: Retrain Other Domains (40 min)
-  |
-  +-- Evaluate existing checkpoints (10 min)
-  +-- Retrain star/octagon/rectangle (30 min, sequential)
-  |
-WS4: Docs (15 min)
+WS3: Docs (15 min)
 ```
 
 ## What NOT to Do
 
-- **Do not retrain H-shape.** It is solved: 11Q q=0.677, optimal, stable.
+- **Do not retrain star.** At geometry ceiling (0.44), mu unchanged. All three reviewers agree.
+- **Do not retrain L-shape or square.** Already optimal.
 - **Do not run parallel TF training.** OOM on RTX 3060.
-- **Do not change type-0/type-1 reward formulas.** Only tune type-2-specific parameters.
-- **Do not train on the 40v sub-loop first.** Reward ratio is borderline (1.0x). Start with 20v.
-- **Do not forget to reset original_area** to sub-loop area in curriculum. This will silently break mu calibration.
+- **Do not attempt rectangle 20k steps.** At 0.8s/step, that's 4.4 hours. Max 7.5k.
+- **Do not skip the ablation.** Without it, we can't attribute improvements to type-0 priority vs random variance.
 
 ## Success Criteria
 
-| Metric | Session 12 | Target | Stretch |
+| Metric | Session 11 | Target | Stretch |
 |--------|-----------|--------|---------|
-| Type-2 actions on annulus | 1 | **>= 3** | >= 5 |
-| Sub-loop completable by greedy | Unknown | **>= 1** | Both sub-loops |
-| Sub-loop DQN completion | N/A | **>= 50%** | >= 80% |
-| Sub-loop DQN quality | N/A | **>= 0.30** | >= 0.40 |
-| Full annulus (oracle + DQN) | N/A | N/A | >= 1 complete |
-| Type-2 enumerate overhead | Unknown | **< 2x** | < 1.5x |
-| Star DQN quality | 0.44 | **>= 0.44** | >= 0.50 |
-| Tests passing | 44 | **47+** | 50+ |
+| Octagon quality | 0.478 (3Q) | **>= 0.55** | >= 0.60 |
+| Rectangle quality | 0.464 (9Q) | **>= 0.50** | element count < 9 |
+| No regressions | All 100% complete | **All 100% complete** | Quality >= baseline for all |
+| Ablation complete | N/A | **Type-0 priority effect measured** | Attributed to specific change |
 
 ## Risk / Mitigation Table
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| No threshold gives >= 3 valid type-2 actions | Medium | High | Try thresholds up to 0.20; if still < 3, consider widening min_gap |
-| Sub-loop not completable by greedy | Medium | High | Try different type-2 splits; increase threshold; defer if no solution |
-| Curriculum implementation exceeds 45 min | Medium | Medium | Fallback: hardcode post-split boundary as static domain |
-| 30k training insufficient for 20v sub-loop | Low | Medium | Decision gates at 10k/20k; H-shape 24v reached optimal at 10k |
-| original_area not reset in curriculum | Low | Critical | Explicit verification step before training |
-| Mu fix / type-0 priority don't help other domains | Medium | Low | These domains already work; improvement is bonus, not required |
-| Retraining regresses existing domains | Low | Medium | Keep old checkpoints; compare before overwriting |
+| Type-0 priority doesn't help on convex domains | Medium | Medium | WS1 ablation detects this; pivot to larger action space |
+| Rectangle training exceeds time budget | High | Low | Cap at 7.5k; treat as stretch goal |
+| Type-0 scan overhead makes training impractical | Medium | Medium | Monitor per-step time; can cache type-0 scan results |
+| Octagon improvement within noise | Medium | Low | Run 3 eval seeds; raise target to 0.55 |
+| Code changes cause subtle regression on circle | Low | Medium | WS1 eval catches this before any retraining |
