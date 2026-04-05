@@ -79,14 +79,15 @@ def _make_rectangle():
     return np.array(bottom + right + top + left, dtype=float)
 
 
-@register_domain("h-shape", "12-vertex H-shaped concave domain (4x4 with crossbar)", max_ep_len=20)
+@register_domain("h-shape", "20-vertex H-shaped concave domain (4x4, 1-unit edge spacing)", max_ep_len=30)
 def _make_h_shape():
-    # CCW winding: 12 vertices on unit grid
+    # CCW winding: 20 vertices on unit grid with 1-unit spacing between all vertices
     # Two vertical bars (1 unit wide) connected by a crossbar (2 units wide, 2 units tall)
     return np.array([
-        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [3.0, 1.0],
-        [3.0, 0.0], [4.0, 0.0], [4.0, 4.0], [3.0, 4.0],
-        [3.0, 3.0], [1.0, 3.0], [1.0, 4.0], [0.0, 4.0],
+        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [2.0, 1.0], [3.0, 1.0],
+        [3.0, 0.0], [4.0, 0.0], [4.0, 1.0], [4.0, 2.0], [4.0, 3.0],
+        [4.0, 4.0], [3.0, 4.0], [3.0, 3.0], [2.0, 3.0], [1.0, 3.0],
+        [1.0, 4.0], [0.0, 4.0], [0.0, 3.0], [0.0, 2.0], [0.0, 1.0],
     ], dtype=float)
 
 

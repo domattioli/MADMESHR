@@ -73,6 +73,9 @@ class MeshEnvironment(gym.Env):
         self.elements = []
         self.element_qualities = []
         self.pending_loops = []
+        # Precompute original boundary segments for concave validity checks
+        self._orig_seg_starts = self.initial_boundary.copy()  # (M, 2)
+        self._orig_seg_ends = np.roll(self.initial_boundary, -1, axis=0).copy()  # (M, 2)
         self._invalidate_action_cache()
         state = self._get_state()
         return state, {}
@@ -732,6 +735,192 @@ class MeshEnvironment(gym.Env):
         # Convexity no longer required — only reject self-intersecting quads
         return no_intersect
 
+    def _batch_edges_cross_original_boundary(self, quads):
+        """Check A: Do any element edges cross the original domain boundary?
+
+        Args:
+            quads: (N, 4, 2) array of quads
+
+        Returns:
+            (N,) bool — True if ANY edge of quad crosses original boundary.
+        """
+        if not hasattr(self, '_orig_seg_starts') or len(self._orig_seg_starts) == 0:
+            return np.zeros(len(quads), dtype=bool)
+
+        N = len(quads)
+        crosses = np.zeros(N, dtype=bool)
+        tol_sq = 1e-16  # tolerance for shared vertex detection
+
+        for edge_idx in range(4):
+            e_start = quads[:, edge_idx, :]              # (N, 2)
+            e_end = quads[:, (edge_idx + 1) % 4, :]      # (N, 2)
+
+            for seg_idx in range(len(self._orig_seg_starts)):
+                s_start = self._orig_seg_starts[seg_idx]  # (2,)
+                s_end = self._orig_seg_ends[seg_idx]      # (2,)
+
+                # Skip if element edge shares a vertex with this boundary segment
+                d_es_ss = np.sum((e_start - s_start) ** 2, axis=1)  # (N,)
+                d_es_se = np.sum((e_start - s_end) ** 2, axis=1)
+                d_ee_ss = np.sum((e_end - s_start) ** 2, axis=1)
+                d_ee_se = np.sum((e_end - s_end) ** 2, axis=1)
+                shared = (d_es_ss < tol_sq) | (d_es_se < tol_sq) | \
+                         (d_ee_ss < tol_sq) | (d_ee_se < tol_sq)
+
+                # Broadcast boundary segment to (N, 2)
+                s_start_b = np.broadcast_to(s_start, (N, 2))
+                s_end_b = np.broadcast_to(s_end, (N, 2))
+
+                hit = self._batch_segments_intersect(e_start, e_end, s_start_b, s_end_b)
+                crosses |= (hit & ~shared)
+
+        return crosses
+
+    def _batch_edges_cross_current_boundary(self, quads, ref_idx):
+        """Check B: Do any element edges cross current boundary (non-consumed)?
+
+        Args:
+            quads: (N, 4, 2) array of quads
+            ref_idx: index of reference vertex in boundary
+
+        Returns:
+            (N,) bool — True if ANY edge of quad crosses non-consumed boundary.
+        """
+        n_bnd = len(self.boundary)
+        if n_bnd < 3:
+            return np.zeros(len(quads), dtype=bool)
+
+        N = len(quads)
+        crosses = np.zeros(N, dtype=bool)
+        tol_sq = 1e-16
+
+        bnd_starts = self.boundary  # (B, 2)
+        bnd_ends = np.roll(self.boundary, -1, axis=0)  # (B, 2)
+
+        for edge_idx in range(4):
+            e_start = quads[:, edge_idx, :]              # (N, 2)
+            e_end = quads[:, (edge_idx + 1) % 4, :]      # (N, 2)
+
+            for seg_idx in range(n_bnd):
+                s_start = bnd_starts[seg_idx]
+                s_end = bnd_ends[seg_idx]
+
+                # Skip if element edge shares a vertex with this boundary segment
+                d_es_ss = np.sum((e_start - s_start) ** 2, axis=1)
+                d_es_se = np.sum((e_start - s_end) ** 2, axis=1)
+                d_ee_ss = np.sum((e_end - s_start) ** 2, axis=1)
+                d_ee_se = np.sum((e_end - s_end) ** 2, axis=1)
+                shared = (d_es_ss < tol_sq) | (d_es_se < tol_sq) | \
+                         (d_ee_ss < tol_sq) | (d_ee_se < tol_sq)
+
+                s_start_b = np.broadcast_to(s_start, (N, 2))
+                s_end_b = np.broadcast_to(s_end, (N, 2))
+
+                hit = self._batch_segments_intersect(e_start, e_end, s_start_b, s_end_b)
+                crosses |= (hit & ~shared)
+
+        return crosses
+
+    def _boundary_has_self_intersection(self):
+        """Check C: Does the current boundary polygon have self-intersecting edges?
+
+        Returns:
+            True if any non-adjacent boundary edges cross each other.
+        """
+        n = len(self.boundary)
+        if n < 4:
+            return False
+
+        tol_sq = 1e-16
+        for i in range(n):
+            p1 = self.boundary[i]
+            p2 = self.boundary[(i + 1) % n]
+            # Check against non-adjacent edges (skip i-1, i, i+1)
+            for j in range(i + 2, n):
+                if i == 0 and j == n - 1:
+                    continue  # adjacent (wrapping)
+                p3 = self.boundary[j]
+                p4 = self.boundary[(j + 1) % n]
+
+                # Skip shared vertices
+                d13 = np.sum((p1 - p3) ** 2)
+                d14 = np.sum((p1 - p4) ** 2)
+                d23 = np.sum((p2 - p3) ** 2)
+                d24 = np.sum((p2 - p4) ** 2)
+                if d13 < tol_sq or d14 < tol_sq or d23 < tol_sq or d24 < tol_sq:
+                    continue
+
+                if self._segments_intersect_scalar(p1, p2, p3, p4):
+                    return True
+        return False
+
+    def _element_overlaps_existing(self, new_element):
+        """Check D: Does new element's edges cross any existing element's edges?
+
+        Args:
+            new_element: (K, 2) array of vertices (K=3 for tri, K=4 for quad)
+
+        Returns:
+            True if overlap detected.
+        """
+        if len(self.elements) == 0:
+            return False
+
+        tol_sq = 1e-16
+        n_new = len(new_element)
+
+        for existing in self.elements:
+            n_ex = len(existing)
+            for i in range(n_new):
+                e1_start = new_element[i]
+                e1_end = new_element[(i + 1) % n_new]
+                for j in range(n_ex):
+                    e2_start = existing[j]
+                    e2_end = existing[(j + 1) % n_ex]
+
+                    # Skip shared vertices
+                    d_ss = np.sum((e1_start - e2_start) ** 2)
+                    d_se = np.sum((e1_start - e2_end) ** 2)
+                    d_es = np.sum((e1_end - e2_start) ** 2)
+                    d_ee = np.sum((e1_end - e2_end) ** 2)
+                    if d_ss < tol_sq or d_se < tol_sq or d_es < tol_sq or d_ee < tol_sq:
+                        continue
+
+                    if self._segments_intersect_scalar(e1_start, e1_end, e2_start, e2_end):
+                        return True
+        return False
+
+    def _segments_intersect_scalar(self, p1, p2, p3, p4):
+        """Scalar segment intersection test (two specific segments)."""
+        def orient(a, b, c):
+            val = (b[1] - a[1]) * (c[0] - b[0]) - (b[0] - a[0]) * (c[1] - b[1])
+            if val > 0:
+                return 1
+            elif val < 0:
+                return 2
+            return 0
+
+        def on_seg(a, b, c):
+            return (min(a[0], c[0]) <= b[0] <= max(a[0], c[0]) and
+                    min(a[1], c[1]) <= b[1] <= max(a[1], c[1]))
+
+        o1 = orient(p1, p2, p3)
+        o2 = orient(p1, p2, p4)
+        o3 = orient(p3, p4, p1)
+        o4 = orient(p3, p4, p2)
+
+        if o1 != o2 and o3 != o4:
+            return True
+        if o1 == 0 and on_seg(p1, p3, p2):
+            return True
+        if o2 == 0 and on_seg(p1, p4, p2):
+            return True
+        if o3 == 0 and on_seg(p3, p1, p4):
+            return True
+        if o4 == 0 and on_seg(p3, p2, p4):
+            return True
+        return False
+
     def _batch_segments_intersect(self, p1, p2, p3, p4):
         """Vectorized segment intersection test.
 
@@ -995,6 +1184,27 @@ class MeshEnvironment(gym.Env):
         pip_indices = np.where(pip_mask)[0]
         if len(pip_indices) > 0:
             valid_mask[pip_indices] = self._batch_is_valid_quad(all_quads[pip_indices])
+
+        # --- Check A: element edges vs original boundary (on survivors) ---
+        survivor_indices = np.where(valid_mask)[0]
+        if len(survivor_indices) > 0:
+            crosses_orig = self._batch_edges_cross_original_boundary(all_quads[survivor_indices])
+            valid_mask[survivor_indices[crosses_orig]] = False
+
+        # --- Check B: element edges vs current boundary (on survivors) ---
+        survivor_indices = np.where(valid_mask)[0]
+        if len(survivor_indices) > 0:
+            crosses_curr = self._batch_edges_cross_current_boundary(all_quads[survivor_indices], ref_idx)
+            valid_mask[survivor_indices[crosses_curr]] = False
+
+        # --- Also apply Check A/B to type-0 if it passed ---
+        if mask[0] and element is not None:
+            type0_quad = np.array(element).reshape(1, -1, 2)
+            if len(type0_quad[0]) == 4:  # only for quads
+                if self._batch_edges_cross_original_boundary(type0_quad)[0]:
+                    mask[0] = False
+                elif self._batch_edges_cross_current_boundary(type0_quad, ref_idx)[0]:
+                    mask[0] = False
 
         # Build actions list
         for k in range(n_candidates):

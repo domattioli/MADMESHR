@@ -538,5 +538,177 @@ class TestBoundaryGrowthGuard:
                 break
 
 
+class TestConcaveValidityChecks:
+    """Tests for concave domain validity checks (session 11)."""
+
+    def _make_h_shape_env(self):
+        h_shape = np.array([
+            [0,0],[1,0],[1,1],[2,1],[3,1],[3,0],[4,0],
+            [4,1],[4,2],[4,3],[4,4],[3,4],[3,3],[2,3],
+            [1,3],[1,4],[0,4],[0,3],[0,2],[0,1],
+        ], dtype=float)
+        return MeshEnvironment(initial_boundary=h_shape)
+
+    def _make_l_shape_env(self):
+        l_shape = np.array([
+            [0.0, 0.0], [2.0, 0.0], [2.0, 1.0],
+            [1.0, 1.0], [1.0, 2.0], [0.0, 2.0],
+        ], dtype=float)
+        return MeshEnvironment(initial_boundary=l_shape)
+
+    def test_check_a_rejects_concave_shortcut(self):
+        """Check A: element edges crossing original boundary are rejected."""
+        env = self._make_h_shape_env()
+        env.reset()
+
+        # Construct a quad that shortcuts across the H-shape notch:
+        # vertices at (0,0), (1,0), (3,0), (0,4) — edge (1,0)-(3,0) is on boundary
+        # but edge (0,0)-(0,4) would be fine, edge (3,0)-(0,4) crosses the notch
+        shortcut_quad = np.array([
+            [[0, 0], [4, 0], [4, 4], [0, 4]]  # huge quad spanning whole H
+        ], dtype=float)
+
+        crosses = env._batch_edges_cross_original_boundary(shortcut_quad)
+        assert crosses[0], "Shortcut quad across H-shape should be detected"
+
+    def test_check_a_accepts_valid_quad(self):
+        """Check A: quads entirely within the domain are accepted."""
+        env = self._make_h_shape_env()
+        env.reset()
+
+        # A quad in the crossbar of the H — all vertices are on boundary vertices
+        # so all edges either coincide with boundary or are interior
+        valid_quad = np.array([
+            [[1, 1], [3, 1], [3, 3], [1, 3]]
+        ], dtype=float)
+
+        crosses = env._batch_edges_cross_original_boundary(valid_quad)
+        assert not crosses[0], "Valid quad within domain should not be flagged"
+
+    def test_check_b_rejects_current_boundary_crossing(self):
+        """Check B: element edges crossing current boundary are rejected."""
+        env = self._make_h_shape_env()
+        env.reset()
+
+        # A quad whose edge crosses a current boundary segment
+        # The H boundary has edge (1,1)-(3,1). A quad with edge crossing that:
+        bad_quad = np.array([
+            [[0, 0.5], [4, 0.5], [4, 1.5], [0, 1.5]]
+        ], dtype=float)
+
+        crosses = env._batch_edges_cross_current_boundary(bad_quad, ref_idx=0)
+        assert crosses[0], "Quad crossing current boundary should be detected"
+
+    def test_check_c_boundary_self_intersection(self):
+        """Check C: self-intersecting boundary is detected."""
+        env = self._make_h_shape_env()
+        env.reset()
+
+        # Create a self-intersecting boundary (figure-8)
+        env.boundary = np.array([
+            [0, 0], [2, 2], [2, 0], [0, 2]  # bowtie/figure-8
+        ], dtype=float)
+
+        assert env._boundary_has_self_intersection(), \
+            "Self-intersecting boundary should be detected"
+
+    def test_check_c_normal_boundary_ok(self):
+        """Check C: normal convex/concave boundaries pass."""
+        env = self._make_h_shape_env()
+        env.reset()
+
+        assert not env._boundary_has_self_intersection(), \
+            "Normal H-shape boundary should not be flagged"
+
+    def test_check_d_overlapping_elements(self):
+        """Check D: overlapping elements are detected."""
+        env = self._make_h_shape_env()
+        env.reset()
+
+        # Place one element
+        elem1 = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=float)
+        env.elements.append(elem1)
+
+        # Create overlapping element
+        elem2 = np.array([[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5]], dtype=float)
+        assert env._element_overlaps_existing(elem2), \
+            "Overlapping element should be detected"
+
+    def test_check_d_adjacent_elements_ok(self):
+        """Check D: elements sharing edges are OK (not flagged as overlap)."""
+        env = self._make_h_shape_env()
+        env.reset()
+
+        # Place one element
+        elem1 = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=float)
+        env.elements.append(elem1)
+
+        # Adjacent element sharing edge (1,0)-(1,1)
+        elem2 = np.array([[1, 0], [2, 0], [2, 1], [1, 1]], dtype=float)
+        assert not env._element_overlaps_existing(elem2), \
+            "Adjacent elements sharing edge should not be flagged"
+
+    def test_h_shape_greedy_no_boundary_violations(self):
+        """Full integration: H-shape greedy produces zero boundary violations."""
+        env = self._make_h_shape_env()
+        denv = DiscreteActionEnv(env, n_angle=12, n_dist=4)
+        obs, info = denv.reset()
+
+        for step in range(25):
+            mask = info['action_mask']
+            if not np.any(mask):
+                break
+            action = np.where(mask)[0][0]
+            obs, reward, done, trunc, info = denv.step(action)
+            if done or trunc:
+                break
+
+        # Check all element edges against original boundary
+        orig_starts = env.initial_boundary.copy()
+        orig_ends = np.roll(env.initial_boundary, -1, axis=0).copy()
+        for i, elem in enumerate(env.elements):
+            n_e = len(elem)
+            for ei in range(n_e):
+                e_s, e_e = elem[ei], elem[(ei+1) % n_e]
+                for si in range(len(orig_starts)):
+                    s_s, s_e = orig_starts[si], orig_ends[si]
+                    tol = 1e-8
+                    if any(np.sum((p1-p2)**2) < tol
+                           for p1, p2 in [(e_s,s_s),(e_s,s_e),(e_e,s_s),(e_e,s_e)]):
+                        continue
+                    assert not env._segments_intersect_scalar(e_s, e_e, s_s, s_e), \
+                        f"Element {i} edge {ei} crosses boundary segment {si}"
+
+    def test_l_shape_greedy_no_boundary_violations(self):
+        """Full integration: L-shape greedy produces zero boundary violations."""
+        env = self._make_l_shape_env()
+        denv = DiscreteActionEnv(env, n_angle=12, n_dist=4)
+        obs, info = denv.reset()
+
+        for step in range(15):
+            mask = info['action_mask']
+            if not np.any(mask):
+                break
+            action = np.where(mask)[0][0]
+            obs, reward, done, trunc, info = denv.step(action)
+            if done or trunc:
+                break
+
+        orig_starts = env.initial_boundary.copy()
+        orig_ends = np.roll(env.initial_boundary, -1, axis=0).copy()
+        for i, elem in enumerate(env.elements):
+            n_e = len(elem)
+            for ei in range(n_e):
+                e_s, e_e = elem[ei], elem[(ei+1) % n_e]
+                for si in range(len(orig_starts)):
+                    s_s, s_e = orig_starts[si], orig_ends[si]
+                    tol = 1e-8
+                    if any(np.sum((p1-p2)**2) < tol
+                           for p1, p2 in [(e_s,s_s),(e_s,s_e),(e_e,s_s),(e_e,s_e)]):
+                        continue
+                    assert not env._segments_intersect_scalar(e_s, e_e, s_s, s_e), \
+                        f"Element {i} edge {ei} crosses boundary segment {si}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

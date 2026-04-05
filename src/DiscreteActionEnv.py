@@ -76,6 +76,14 @@ class DiscreteActionEnv(gym.Wrapper):
             info = {"valid": False, "action_mask": self._action_mask.copy()}
             return enriched, -0.1, False, False, info
 
+        # Check D: element overlap with existing elements (before committing)
+        if self.env._element_overlaps_existing(new_element):
+            self.env._invalidate_action_cache()
+            self._enumerate()
+            enriched = self.env._get_enriched_state()
+            info = {"valid": False, "action_mask": self._action_mask.copy()}
+            return enriched, -0.1, False, False, info
+
         # Add element to mesh
         self.env.elements.append(new_element)
         quality = self.env._calculate_element_quality(new_element)
@@ -88,6 +96,17 @@ class DiscreteActionEnv(gym.Wrapper):
 
         # Boundary growth guard: undo if boundary grew
         if len(self.env.boundary) > saved_boundary_count:
+            self.env.elements.pop()
+            self.env.element_qualities.pop()
+            self.env.boundary = saved_boundary
+            self.env._invalidate_action_cache()
+            self._enumerate()
+            enriched = self.env._get_enriched_state()
+            info = {"valid": False, "action_mask": self._action_mask.copy()}
+            return enriched, -0.1, False, False, info
+
+        # Check C: boundary self-intersection guard (rollback if detected)
+        if self.env._boundary_has_self_intersection():
             self.env.elements.pop()
             self.env.element_qualities.pop()
             self.env.boundary = saved_boundary
