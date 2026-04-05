@@ -1,10 +1,10 @@
-# Session 12 Report: Type-2 DQN Architecture + H-shape 24v
+# Session 12 Report: Type-2 DQN Architecture + H-shape 24v + Mu Calibration Fix
 
 **Date:** 2026-04-05
 
 ## Summary
 
-Three workstreams completed plus project reorganization. (1) H-shape domain revised to 24 vertices with crossbar y=1.5-2.5 per user request. DQN training with stability fixes (hard target updates, 20k buffer, faster epsilon) reached 0% completion -- agent converges to 3 elements, trapped by mu penalty in the narrower geometry. (2) Type-2 DQN architecture fully implemented: Discrete(57) action space with 8 type-2 slots, split bonus, sub-loop completion bonus. All validity checks applied. 44 tests passing. (3) Project reorganized with scripts/, pyproject.toml, __init__.py files. Session 13 plan written with adversarial review.
+Five workstreams completed plus project reorganization. (1) H-shape domain revised to 24 vertices with crossbar y=1.5-2.5. (2) Type-2 DQN architecture fully implemented: Discrete(57) with 8 type-2 slots, split bonus, sub-loop completion bonus. (3) DQN stability fixes: hard target updates, smaller buffer, faster epsilon. (4) Mu calibration fix: scale A_min/A_max by expected element count. (5) Type-0 priority vertex selection + boundary distance filter + centroid check on auto-close. After all fixes, H-shape DQN reaches 11Q q=0.677 at 100% completion -- confirmed as theoretical optimum by oracle. Tests grew from 37 to 44. All 8 domains pass 7-point validation. Project reorganized with scripts/, pyproject.toml, __init__.py.
 
 ## What Was Completed
 
@@ -18,7 +18,7 @@ Three workstreams completed plus project reorganization. (1) H-shape domain revi
 
 ---
 
-### WS1: H-shape DQN Stability Fix (FAILED)
+### WS1: H-shape DQN Stability Fix (INITIAL ATTEMPT -- FAILED)
 
 **Problem:** 20v H-shape DQN regressed from 100% (10k) to 0% (15k) in session 11.
 
@@ -29,7 +29,7 @@ Three workstreams completed plus project reorganization. (1) H-shape domain revi
 
 **CLI added:** `--target-update-freq` and `--buffer-size` arguments.
 
-**Training Results (24v, 30k steps):**
+**Training Results (24v, 30k steps, old mu calibration):**
 
 | Eval Step | Return | MeanQ | Elements | Epsilon | Completion |
 |-----------|--------|-------|----------|---------|------------|
@@ -40,15 +40,59 @@ Three workstreams completed plus project reorganization. (1) H-shape domain revi
 | 25k | -2.06 | 0.617 | 6.0 | 0.050 | 0% |
 | **30k** | **-2.03** | **0.617** | **6.0** | **0.050** | **0%** |
 
-**Diagnosis:** The agent initially converges to 3 elements (5k-15k), then escapes to 6 elements (20k-30k), but never finds completion. This is a mu-avoidance trap: the narrower crossbar (1 unit tall) produces smaller elements that trigger harsh density penalties. With original_area=10.0, A_max=1.0, and element areas ~0.5 in the narrow strips, mu ~= -0.56 per element. The agent correctly learned that placing fewer elements maximizes return.
-
-**Root cause:** NOT a stability problem. The original 20v instability (session 11) was likely the same mu-avoidance -- the agent found completion at 10k during high-epsilon exploration but then learned that avoiding elements gave better return. The stability fixes (hard target updates, etc.) are still valuable but don't address the reward calibration issue.
-
-**Key insight:** The 24v H-shape with narrower crossbar (y=1.5-2.5) creates a harsher mu landscape than the 20v (y=1-3). Session 13 should address mu calibration for narrow geometries before retraining.
+**Diagnosis:** Mu-avoidance trap. The narrower crossbar (1 unit tall) produces smaller elements that trigger harsh density penalties. With original_area=10.0, A_max=1.0, and element areas ~0.5 in the narrow strips, mu ~= -0.56 per element. The agent correctly learned that placing fewer elements maximizes return.
 
 ---
 
-### WS2: Type-2 DQN Architecture (COMPLETE)
+### WS2: Mu Calibration Fix (COMPLETE)
+
+**Problem:** The mu (density) penalty used fixed A_min/A_max thresholds that did not account for domain complexity. Domains requiring many elements (like 24v H-shape) had elements far smaller than A_max, producing harsh per-step penalties that discouraged mesh completion.
+
+**Fix:** Scale A_min/A_max by expected element count:
+- `ideal_area = original_area / (n_verts / 2)` -- expected area per element assuming ~n_verts/2 elements
+- `A_min = 0.1 * ideal_area`
+- `A_max = 0.5 * ideal_area`
+
+This makes the density penalty domain-aware: elements of the expected size receive near-zero mu penalty regardless of domain complexity.
+
+**Training Results (24v, 30k steps, with mu fix):**
+
+| Eval Step | Return | MeanQ | Elements | Epsilon | Completion |
+|-----------|--------|-------|----------|---------|------------|
+| 5k | 10.92 | 0.482 | 16.0 | 0.683 | 100% |
+| 10k | 11.26 | 0.491 | 15.0 | 0.365 | 100% |
+| 15k | 11.32 | 0.491 | 15.0 | 0.050 | 100% |
+| 20k | 11.32 | 0.491 | 15.0 | 0.050 | 100% |
+| **25k** | **11.32** | **0.491** | **15.0** | **0.050** | **100%** |
+| **30k** | **11.32** | **0.491** | **15.0** | **0.050** | **100%** |
+
+**Result:** 100% completion, 15Q q=0.491, stable from 15k-30k. The mu fix eliminated the avoidance trap entirely.
+
+---
+
+### WS3: Type-0 Priority + Boundary Distance Filter (COMPLETE)
+
+**Problem:** After mu fix, the agent achieved completion but used 15 elements (vs ~11 expected for optimal coverage). Investigation showed the angle-based vertex selection was not choosing vertices where type-0 actions would be most beneficial.
+
+**Fix 1 -- Type-0 priority vertex selection:** Scan all boundary vertices for the best type-0 opportunity before falling back to angle-based selection. This ensures that whenever a clean type-0 (adjacent vertex connection consuming 2 boundary vertices) is available, it is prioritized.
+
+**Fix 2 -- Boundary distance filter:** Reject interior vertices (type-1) that are closer than 3% of fan radius to non-adjacent boundary edges. This prevents the agent from placing vertices that create near-degenerate configurations.
+
+**Fix 3 -- Centroid check on bnd==4 auto-close:** When the boundary has exactly 4 vertices and auto-closes with a quad, validate that the centroid lies inside the domain. Prevents invalid auto-close on concave final boundaries.
+
+**Training Results (24v, 15k steps, with mu fix + type-0 priority):**
+
+| Eval Step | Return | MeanQ | Elements | Epsilon | Completion |
+|-----------|--------|-------|----------|---------|------------|
+| 5k | 11.49 | 0.649 | 12.0 | 0.683 | 100% |
+| 10k | 11.77 | 0.677 | 11.0 | 0.365 | 100% |
+| **15k** | **11.77** | **0.677** | **11.0** | **0.050** | **100%** |
+
+**Result:** 100% completion, 11Q q=0.677, stable from 10k-15k+. Oracle confirms 11Q q=0.677 is the theoretical optimum for this domain. The type-0 priority reduced element count from 15 to 11 by preferring boundary-consuming actions.
+
+---
+
+### WS4: Type-2 DQN Architecture (COMPLETE)
 
 **Problem:** DQN could not use type-2 actions, blocking training on annulus and domains needing interior splits.
 
@@ -85,7 +129,7 @@ Three workstreams completed plus project reorganization. (1) H-shape domain revi
 
 ---
 
-### WS3: Documentation + Project Cleanup (COMPLETE)
+### WS5: Documentation + Project Cleanup (COMPLETE)
 
 #### Project Reorganization
 - **scripts/**: Moved `validate_mesh.py`, `quality_diagnostic.py`, `test_domains.py`, `annulus_oracle_type2.py` from root
@@ -96,7 +140,18 @@ Three workstreams completed plus project reorganization. (1) H-shape domain revi
 
 #### Documentation
 - **CLAUDE.md**: Updated with type-2 architecture (Discrete(57), reward formula, sub-loop bonus), hard target updates, 24v H-shape, validate_mesh command, script paths
-- **Session 13 plan**: Written with adversarial review (3 agents: devil's advocate, scope realist, reward analyst). Key decisions: train on smaller sub-loop (~20v), threshold tuning before training, verify sub-loop completability, curriculum reset with correct original_area.
+- **Session 13 plan**: Written with adversarial review (3 agents: devil's advocate, scope realist, reward analyst)
+
+---
+
+## H-shape DQN Progression Summary
+
+| Stage | Completion | Elements | Quality | Notes |
+|-------|-----------|----------|---------|-------|
+| Session 11 (20v) | 100% (10k), 0% (15k) | 10Q | 0.533 | Unstable, regressed |
+| S12 initial (24v, old mu) | 0% | 3-6 | 0.617 (6 elem) | Mu-avoidance trap |
+| S12 after mu fix | 100% | 15Q | 0.491 | Stable 15k-30k |
+| S12 after type-0 priority | 100% | **11Q** | **0.677** | **Optimal, stable 10k-15k+** |
 
 ---
 
@@ -106,9 +161,9 @@ Three workstreams completed plus project reorganization. (1) H-shape domain revi
 |--------|-----------|------------|--------|
 | H-shape vertices | 20 | **24** | +4 (user request) |
 | H-shape crossbar | y=1-3 | **y=1.5-2.5** | Narrower |
-| H-shape DQN completion | 100% (10k) | **0%** | Regression (mu-avoidance) |
-| H-shape DQN quality | 0.533 (10k) | **0.617** (6 elements) | Higher but only 6 elements |
-| H-shape greedy completion | Incomplete | **Incomplete** | Same (30Q both) |
+| H-shape DQN completion | 100% (10k only) | **100% (stable)** | Fixed |
+| H-shape DQN quality | 0.533 (10Q) | **0.677 (11Q)** | +0.144 |
+| H-shape DQN stability | Regressed at 15k | **Stable 10k-15k+** | Fixed |
 | Action space | Discrete(49) | **Discrete(57)** | +8 type-2 slots |
 | Type-2 on annulus | N/A | **1 action** | New capability |
 | Tests passing | 37 | **44** | +7 |
@@ -116,27 +171,28 @@ Three workstreams completed plus project reorganization. (1) H-shape domain revi
 
 ## What Didn't Work
 
-### H-shape 24v DQN trapped by mu penalty
-The narrower crossbar (1 unit tall vs 2) creates a harsher density penalty landscape. Elements in the 0.5-unit-wide inner walls average area ~0.5, giving mu ~= -0.56. The DQN learns to avoid placing elements altogether. The stability fixes (hard target updates, smaller buffer, faster epsilon) are valuable architectural improvements but don't address the fundamental reward calibration issue.
-
-**Greedy comparison:** Returns -19.59 for 30 elements vs DQN's -2.63 for 3 elements. The DQN is correctly maximizing return by avoiding placement -- the reward structure penalizes the desired behavior.
+### Initial H-shape 24v DQN trapped by mu penalty (before mu fix)
+The narrower crossbar (1 unit tall vs 2) created a harsher density penalty landscape. Elements in the 0.5-unit-wide inner walls averaged area ~0.5, giving mu ~= -0.56. The DQN learned to avoid placing elements altogether. The stability fixes (hard target updates, smaller buffer, faster epsilon) were valuable architectural improvements but did not address the fundamental reward calibration issue.
 
 ### Annulus type-2 coverage limited
 Only 1 of 7 proximity pairs passes `_form_type2_element` validation at threshold=0.02. Session 13 will tune the threshold to increase coverage.
 
 ## What Went Well
 
+- **Mu calibration fix was transformative.** Scaling A_min/A_max by expected element count turned 0% completion into 100% stable completion. This fix applies to all domains, not just H-shape.
+- **Type-0 priority found the optimal mesh.** 11Q q=0.677 matches oracle, reducing from 15 excess elements. Simple heuristic with large impact.
 - **Type-2 architecture is clean.** The 8-slot indexed system with proximity pair enumeration works correctly. All validity checks are applied. No crashes in random walk testing.
-- **Project structure improved.** Moving scripts, adding pyproject.toml and __init__.py makes the codebase more organized for future development.
-- **Stability improvements preserved.** Hard target updates and configurable buffer size are good architectural additions even though they didn't solve the H-shape training.
-- **Adversarial planning identified key session 13 risks.** The devil's advocate found the WS1/WS2 circular dependency, the reward analyst found the mu calibration risk with original_area, and the scope realist correctly estimated the curriculum implementation time.
+- **Project structure improved.** Moving scripts, adding pyproject.toml and __init__.py makes the codebase more organized.
+- **Stability improvements preserved.** Hard target updates and configurable buffer size are good architectural additions.
+- **H-shape fully solved.** From 0% completion (initial) to optimal 11Q solution confirmed by oracle -- all within one session.
 
 ## Files Changed
 
 | File | Changes |
 |------|---------|
 | `main.py` | H-shape revised to 24v; added --buffer-size and --target-update-freq CLI args; wired DQN target_update_freq and buffer capacity |
-| `src/DiscreteActionEnv.py` | Type-2 action slots (49-56); _enumerate scans all proximity pairs; type-2 step handling with split bonus; sub-loop completion bonus; _fail_step helper |
+| `src/DiscreteActionEnv.py` | Type-2 action slots (49-56); type-2 step handling with split bonus; sub-loop completion bonus; _fail_step helper; boundary distance filter (3% fan radius); type-0 priority vertex selection; centroid check on bnd==4 auto-close |
+| `src/MeshEnvironment.py` | Mu calibration fix (A_min/A_max scaled by expected element count) |
 | `src/DQN.py` | Added target_update_freq param; hard target updates when >0, soft Polyak when 0 |
 | `tests/test_discrete_env.py` | Updated action space assertions (49->57); +7 new tests (TestType2DQNIntegration) |
 | `CLAUDE.md` | Updated architecture (Discrete(57)), commands (scripts/), known issues |
@@ -145,20 +201,20 @@ Only 1 of 7 proximity pairs passes `_form_type2_element` validation at threshold
 | `src/utils/__init__.py` | New: package init |
 | `scripts/__init__.py` | New: package init |
 | `scripts/*.py` | Moved from root; fixed sys.path imports |
-| `checkpoints/h-shape-24v-s12/` | 24v H-shape DQN model (best: 6Q, q=0.617) |
-| `output/latest/h-shape.png` | DQN eval (24v, 3Q) |
+| `checkpoints/h-shape-24v-s12/` | 24v H-shape DQN model (best: 11Q, q=0.677) |
+| `output/latest/h-shape.png` | DQN eval (24v, 11Q) |
 | `output/latest/h-shape_greedy.png` | Greedy baseline (24v) |
 
 ## Short-term Next Steps (Session 13)
 
 1. **Type-2 threshold tuning.** Increase threshold to get >= 3 valid type-2 actions on annulus. Verify sub-loop completability before training.
 
-2. **Annulus sub-loop curriculum training.** Pre-place type-2 elements, train DQN on smaller (~20v) sub-loop. Reset original_area correctly.
+2. **Annulus sub-loop curriculum training.** Pre-place type-2 elements, train DQN on smaller (~20v) sub-loop. Reset original_area correctly. The mu fix and type-0 priority should help training converge faster.
 
-3. **H-shape mu calibration.** Investigate adjusting A_min/A_max thresholds for narrow geometries, or exempt elements in narrow regions from mu penalty. Alternatively, lower max_ep_len penalty and let the agent find its own completion strategy.
+3. **Retrain other domains with mu fix + type-0 priority.** Star (0.44), octagon (0.61), circle (0.78), rectangle (0.464) may improve with the new mu calibration and vertex selection.
 
 ## Medium-term Next Steps (Sessions 13-14)
 
 4. **Full annulus end-to-end.** Oracle type-2 + DQN sub-loops, then full DQN with type-2 actions.
 
-5. **Reward structure review.** The mu-avoidance trap on H-shape 24v suggests the density penalty needs domain-aware calibration. Consider scaling A_min/A_max by the number of expected elements, not just the original area.
+5. **Pan et al. benchmark.** Recreate Pan et al. test domains for comparison.
