@@ -1167,6 +1167,30 @@ class MeshEnvironment(gym.Env):
         # --- Batch point-in-polygon for all candidates ---
         pip_mask = self._batch_point_in_polygon(candidates, self.boundary)
 
+        # --- Reject candidates too close to any boundary edge ---
+        # Prevents near-degenerate elements from interior vertices on boundary walls
+        min_dist_threshold = 0.03 * radius  # scale by fan radius
+        pip_indices_close = np.where(pip_mask)[0]
+        if len(pip_indices_close) > 0:
+            bnd_starts = self.boundary
+            bnd_ends = np.roll(self.boundary, -1, axis=0)
+            segs = bnd_ends - bnd_starts  # (B, 2)
+            seg_len_sq = np.sum(segs ** 2, axis=1)  # (B,)
+            seg_len_sq = np.maximum(seg_len_sq, 1e-20)
+            for ci in pip_indices_close:
+                pt = candidates[ci]
+                # Vectorized point-to-segment distance
+                diff = pt - bnd_starts  # (B, 2)
+                t = np.clip(np.sum(diff * segs, axis=1) / seg_len_sq, 0, 1)
+                closest = bnd_starts + t[:, None] * segs
+                dists = np.linalg.norm(pt - closest, axis=1)
+                # Exclude edges adjacent to ref vertex (those share the quad vertex)
+                adj_mask = np.ones(len(self.boundary), dtype=bool)
+                adj_mask[ref_idx] = False
+                adj_mask[(ref_idx - 1) % n_bnd] = False
+                if np.min(dists[adj_mask]) < min_dist_threshold:
+                    pip_mask[ci] = False
+
         # --- For PIP-passing candidates, batch form quads and validate ---
         v2 = self.boundary[(ref_idx + 1) % n_bnd]
         v4 = self.boundary[(ref_idx - 1) % n_bnd]
@@ -1197,7 +1221,7 @@ class MeshEnvironment(gym.Env):
             crosses_curr = self._batch_edges_cross_current_boundary(all_quads[survivor_indices], ref_idx)
             valid_mask[survivor_indices[crosses_curr]] = False
 
-        # --- Also apply Check A/B to type-0 if it passed ---
+        # --- Also apply Check A/B and degeneracy check to type-0 if it passed ---
         if mask[0] and element is not None:
             type0_quad = np.array(element).reshape(1, -1, 2)
             if len(type0_quad[0]) == 4:  # only for quads
