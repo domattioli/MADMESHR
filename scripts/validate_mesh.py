@@ -15,8 +15,8 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from src.MeshEnvironment import MeshEnvironment
-from src.DiscreteActionEnv import DiscreteActionEnv
+from madmeshr.mesh_environment import MeshEnvironment
+from madmeshr.discrete_action_env import DiscreteActionEnv
 
 
 def validate_mesh(env, domain_name):

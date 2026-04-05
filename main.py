@@ -17,7 +17,7 @@ Usage examples:
 import argparse
 import numpy as np
 
-from src.MeshEnvironment import MeshEnvironment
+from madmeshr.mesh_environment import MeshEnvironment
 
 
 # ---------------------------------------------------------------------------
@@ -27,11 +27,12 @@ from src.MeshEnvironment import MeshEnvironment
 DOMAINS = {}
 
 
-def register_domain(name, description, max_ep_len=20):
+def register_domain(name, description, max_ep_len=20, type0_priority=False):
     """Decorator to register a domain factory function."""
     def decorator(fn):
         fn.description = description
         fn.max_ep_len = max_ep_len
+        fn.type0_priority = type0_priority
         DOMAINS[name] = fn
         return fn
     return decorator
@@ -62,7 +63,7 @@ def _make_star():
     return np.column_stack([radii * np.cos(angles), radii * np.sin(angles)])
 
 
-@register_domain("l-shape", "6-vertex L-shaped concave domain", max_ep_len=10)
+@register_domain("l-shape", "6-vertex L-shaped concave domain", max_ep_len=10, type0_priority=True)
 def _make_l_shape():
     return np.array([
         [0.0, 0.0], [2.0, 0.0], [2.0, 1.0],
@@ -79,7 +80,7 @@ def _make_rectangle():
     return np.array(bottom + right + top + left, dtype=float)
 
 
-@register_domain("h-shape", "24-vertex H-shaped concave domain (4x4, crossbar y=1.5-2.5)", max_ep_len=30)
+@register_domain("h-shape", "24-vertex H-shaped concave domain (4x4, crossbar y=1.5-2.5)", max_ep_len=30, type0_priority=True)
 def _make_h_shape():
     # CCW winding: 24 vertices, crossbar spans y=1.5 to y=2.5
     # Two vertical bars (1 unit wide) connected by a crossbar (2 units wide, 1 unit tall)
@@ -230,12 +231,12 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_greedy(boundary, domain_name, n_angle=12, n_dist=4):
+def run_greedy(boundary, domain_name, n_angle=12, n_dist=4, type0_priority=False):
     """Run a greedy-by-quality rollout and save visualization."""
-    from src.DiscreteActionEnv import DiscreteActionEnv
-    from src.utils.visualization import save_mesh_result
+    from madmeshr.discrete_action_env import DiscreteActionEnv
+    from madmeshr.utils.visualization import save_mesh_result
 
-    env = MeshEnvironment(initial_boundary=boundary)
+    env = MeshEnvironment(initial_boundary=boundary, type0_priority=type0_priority)
     discrete_env = DiscreteActionEnv(env, n_angle=n_angle, n_dist=n_dist)
 
     state, info = discrete_env.reset()
@@ -272,7 +273,7 @@ def run_greedy(boundary, domain_name, n_angle=12, n_dist=4):
         if truncated:
             break
 
-    filepath = save_mesh_result(env, f"{domain_name}_greedy", "output/latest")
+    filepath = save_mesh_result(env, f"{domain_name}_greedy", "output")
 
     n_quads = sum(1 for e in env.elements if len(e) == 4)
     n_tris = sum(1 for e in env.elements if len(e) == 3)
@@ -299,19 +300,22 @@ def main():
     args = parse_args()
 
     # Build domain
-    boundary = DOMAINS[args.domain]()
-    env = MeshEnvironment(initial_boundary=boundary)
-    print(f"Domain: {args.domain} ({len(boundary)} vertices)")
+    domain_fn = DOMAINS[args.domain]
+    boundary = domain_fn()
+    type0_prio = getattr(domain_fn, 'type0_priority', False)
+    env = MeshEnvironment(initial_boundary=boundary, type0_priority=type0_prio)
+    print(f"Domain: {args.domain} ({len(boundary)} vertices, type0_priority={type0_prio})")
 
     if args.greedy:
-        run_greedy(boundary, args.domain, n_angle=args.n_angle, n_dist=args.n_dist)
+        run_greedy(boundary, args.domain, n_angle=args.n_angle, n_dist=args.n_dist,
+                   type0_priority=type0_prio)
         return
 
     if args.algorithm == 'dqn':
-        from src.DiscreteActionEnv import DiscreteActionEnv
-        from src.DQN import DQN, MaskedReplayBuffer
-        from src.trainer_dqn import DQNTrainer
-        from src.utils.visualization import run_dqn_eval_and_save
+        from madmeshr.discrete_action_env import DiscreteActionEnv
+        from madmeshr.dqn import DQN, MaskedReplayBuffer
+        from madmeshr.trainer_dqn import DQNTrainer
+        from madmeshr.utils.visualization import run_dqn_eval_and_save
 
         discrete_env = DiscreteActionEnv(env, n_angle=args.n_angle, n_dist=args.n_dist)
         agent = DQN(state_dim=44, num_actions=discrete_env.max_actions,
@@ -324,7 +328,8 @@ def main():
         if args.eval_only:
             stats = run_dqn_eval_and_save(
                 agent, boundary, args.domain,
-                n_angle=args.n_angle, n_dist=args.n_dist)
+                n_angle=args.n_angle, n_dist=args.n_dist,
+                type0_priority=type0_prio)
             print(f"Eval: return={stats['return']:.2f} | "
                   f"quality={stats['mean_quality']:.3f} | "
                   f"elements={stats['n_elements']} ({stats['n_quads']}Q+{stats['n_triangles']}T) | "
@@ -349,14 +354,15 @@ def main():
         # Save visualization of final model
         stats = run_dqn_eval_and_save(
             agent, boundary, args.domain,
-            n_angle=args.n_angle, n_dist=args.n_dist)
+            n_angle=args.n_angle, n_dist=args.n_dist,
+            type0_priority=type0_prio)
         print(f"\nFinal eval: return={stats['return']:.2f} | "
               f"quality={stats['mean_quality']:.3f} | "
               f"elements={stats['n_elements']} ({stats['n_quads']}Q+{stats['n_triangles']}T) | "
               f"complete={stats['completed']}")
 
     else:
-        from src.SAC import SAC, ReplayBuffer
+        from madmeshr.sac import SAC, ReplayBuffer
 
         agent = SAC(
             state_dim=env.observation_space.shape[0],

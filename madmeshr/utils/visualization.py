@@ -93,7 +93,7 @@ def visualize_mesh_generation(env, agent, max_steps=100):
         print("imageio not installed -- skipping animation export.")
 
 
-def save_mesh_result(env, domain_name, output_dir="output/latest"):
+def save_mesh_result(env, domain_name, output_dir="output"):
     """Plot the final mesh state and save to output_dir/{domain_name}.png.
 
     Shows original boundary, placed elements (colored by quality), and remaining
@@ -160,7 +160,7 @@ def save_mesh_result(env, domain_name, output_dir="output/latest"):
 
 
 def run_dqn_eval_and_save(agent, boundary, domain_name, n_angle=12, n_dist=4,
-                          output_dir="output/latest"):
+                          output_dir="output", type0_priority=False):
     """Run a single deterministic DQN episode and save the mesh visualization.
 
     Args:
@@ -169,14 +169,15 @@ def run_dqn_eval_and_save(agent, boundary, domain_name, n_angle=12, n_dist=4,
         domain_name: Name for the file (e.g., "star_10v")
         n_angle, n_dist: Action space resolution
         output_dir: Where to save
+        type0_priority: Enable type-0 priority vertex selection (for concave domains)
 
     Returns:
         dict with episode stats (return, quality, completion, n_elements)
     """
-    from src.MeshEnvironment import MeshEnvironment
-    from src.DiscreteActionEnv import DiscreteActionEnv
+    from madmeshr.mesh_environment import MeshEnvironment
+    from madmeshr.discrete_action_env import DiscreteActionEnv
 
-    env = MeshEnvironment(initial_boundary=boundary)
+    env = MeshEnvironment(initial_boundary=boundary, type0_priority=type0_priority)
     discrete_env = DiscreteActionEnv(env, n_angle=n_angle, n_dist=n_dist)
 
     state, info = discrete_env.reset()

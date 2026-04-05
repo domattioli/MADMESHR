@@ -2,7 +2,7 @@ import numpy as np
 import gym
 from gym import spaces
 
-from src.MeshEnvironment import MeshEnvironment
+from madmeshr.mesh_environment import MeshEnvironment
 
 __all__ = ['DiscreteActionEnv']
 

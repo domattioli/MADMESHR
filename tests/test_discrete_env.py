@@ -8,9 +8,9 @@ import os
 # Ensure project root is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from src.MeshEnvironment import MeshEnvironment
-from src.DiscreteActionEnv import DiscreteActionEnv
-from src.DQN import DQN, MaskedReplayBuffer
+from madmeshr.mesh_environment import MeshEnvironment
+from madmeshr.discrete_action_env import DiscreteActionEnv
+from madmeshr.dqn import DQN, MaskedReplayBuffer
 
 
 # ---------------------------------------------------------------------------

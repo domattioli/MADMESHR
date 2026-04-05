@@ -13,7 +13,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from src.MeshEnvironment import MeshEnvironment
+from madmeshr.mesh_environment import MeshEnvironment
 
 
 def _element_edges(elem):

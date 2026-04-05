@@ -17,10 +17,10 @@ Before drafting any plan, read and synthesize these sources:
 
 | File | What to look for |
 |------|-----------------|
-| `src/DiscreteActionEnv.py` | Reward formulas, action space params, completion logic |
-| `src/MeshEnvironment.py` | Action enumeration, quality metric, boundary tracking |
-| `src/DQN.py` | Network architecture, hyperparams (gamma, tau, lr) |
-| `src/trainer_dqn.py` | Training loop, eval logic, epsilon schedule |
+| `madmeshr/discrete_action_env.py` | Reward formulas, action space params, completion logic |
+| `madmeshr/mesh_environment.py` | Action enumeration, quality metric, boundary tracking |
+| `madmeshr/dqn.py` | Network architecture, hyperparams (gamma, tau, lr) |
+| `madmeshr/trainer_dqn.py` | Training loop, eval logic, epsilon schedule |
 | `main.py` | CLI args, how components are wired together |
 | `tests/test_discrete_env.py` | What's tested, what's not |
 

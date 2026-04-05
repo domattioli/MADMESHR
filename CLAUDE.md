@@ -52,17 +52,17 @@ main.py (CLI + domain registry)
 
 ### Key Components
 
-- **`src/MeshEnvironment.py`** (~1600 lines): Core advancing-front environment. Manages polygon boundary, element formation (`_form_element`), boundary updates (`_update_boundary`, `_update_boundary_type2`), state computation, reward calculation, and geometry utilities (intersection, convexity, point-in-polygon). The continuous action space `[-1,1]^3` maps to element type + vertex placement. Supports multi-loop boundaries via `pending_loops` for type-2 splits. Concave domain validity checks (session 11): `_batch_edges_cross_original_boundary`, `_batch_edges_cross_current_boundary`, `_boundary_has_self_intersection`, `_element_overlaps_existing`.
+- **`madmeshr/mesh_environment.py`** (~1600 lines): Core advancing-front environment. Manages polygon boundary, element formation (`_form_element`), boundary updates (`_update_boundary`, `_update_boundary_type2`), state computation, reward calculation, and geometry utilities (intersection, convexity, point-in-polygon). The continuous action space `[-1,1]^3` maps to element type + vertex placement. Supports multi-loop boundaries via `pending_loops` for type-2 splits. Concave domain validity checks (session 11): `_batch_edges_cross_original_boundary`, `_batch_edges_cross_current_boundary`, `_boundary_has_self_intersection`, `_element_overlaps_existing`.
 
-- **`src/DiscreteActionEnv.py`**: Wraps MeshEnvironment with a Discrete(57) action space. Action 0 = type-0 (connect adjacent vertices). Actions 1-48 = type-1 on a 12-angle × 4-radial grid (interior vertex placement). Actions 49-56 = type-2 (proximity split actions, up to 8 slots sorted by distance). Provides `info["action_mask"]` boolean array and enriched 44-float state vector. Type-2 reward: `eta_e + 0.3*eta_b + 0.3` (split bonus, no mu penalty). Sub-loop completion bonus: +2.0 when `pending_loop` activates.
+- **`madmeshr/discrete_action_env.py`**: Wraps MeshEnvironment with a Discrete(57) action space. Action 0 = type-0 (connect adjacent vertices). Actions 1-48 = type-1 on a 12-angle × 4-radial grid (interior vertex placement). Actions 49-56 = type-2 (proximity split actions, up to 8 slots sorted by distance). Provides `info["action_mask"]` boolean array and enriched 44-float state vector. Type-2 reward: `eta_e + 0.3*eta_b + 0.3` (split bonus, no mu penalty). Sub-loop completion bonus: +2.0 when `pending_loop` activates.
 
-- **`src/DQN.py`**: Dueling Double DQN. Architecture: shared trunk → value stream + advantage stream. Q = V + (A - mean_valid(A)). Invalid actions masked to -inf. `MaskedReplayBuffer` stores (state, action, reward, next_state, next_mask, done). Supports hard target updates via `target_update_freq` parameter (0=soft Polyak, >0=hard copy every N steps).
+- **`madmeshr/dqn.py`**: Dueling Double DQN. Architecture: shared trunk → value stream + advantage stream. Q = V + (A - mean_valid(A)). Invalid actions masked to -inf. `MaskedReplayBuffer` stores (state, action, reward, next_state, next_mask, done). Supports hard target updates via `target_update_freq` parameter (0=soft Polyak, >0=hard copy every N steps).
 
-- **`src/trainer_dqn.py`**: `DQNTrainer` with linear epsilon decay, periodic eval, best-model checkpointing.
+- **`madmeshr/trainer_dqn.py`**: `DQNTrainer` with linear epsilon decay, periodic eval, best-model checkpointing.
 
 - **`main.py`**: Domain registry (decorator pattern), CLI argument parsing, orchestrates training/eval for both DQN and legacy SAC.
 
-- **`src/utils/visualization.py`**: Mesh rendering and eval visualization, saves to `output/latest/`.
+- **`madmeshr/utils/visualization.py`**: Mesh rendering and eval visualization, saves to `output/`.
 
 ### State Representation
 44-float enriched vector: boundary context (neighbor positions, angles) + fan-shape sample points + area ratio.
@@ -96,10 +96,13 @@ All development sessions must follow the adversarial planning process documented
 
 - Session 5 scaled eta_b by 0.3 and added quality-gated completion bonus (5+10*mean_q). Star quality improved 0.223→0.371 (5Q). Octagon (0.478, 3Q), rectangle (0.464, 9Q), L-shape (0.459, 2Q) stable.
 - Quality ceiling is geometry-limited (star≈0.44, circle≈0.78, octagon≈0.61), not discretization-limited.
-- SAC agent (`src/SAC.py`, `src/trainer.py`) is legacy and does not learn effectively — DQN is the active approach.
-- Octagon quality (0.478) still below 0.50 target and 0.61 ceiling — room for improvement.
+- SAC agent (`madmeshr/sac.py`, `madmeshr/trainer.py`) is legacy and does not learn effectively — DQN is the active approach.
+- Octagon quality 24×4: 0.579 (5Q), 12×4: 0.478 (3Q). Ceiling 0.61 — gap is action-space limited.
 - Type-2 boundary split now correctly produces two separate loops (session 10). Annulus oracle: 23Q, q=0.420 (incomplete, stuck at 21 boundary vertices on active loop).
 - DiscreteActionEnv has boundary growth guard (session 10): reverts elements that increase boundary count.
 - Session 11 added 4 concave domain validity checks. All 8 domains pass 7-point validation with zero boundary violations. H-shape DQN (20v): 10Q, q=0.533, 100% completion. L-shape DQN: 2Q, q=0.459.
 - H-shape domain updated to 24v (crossbar y=1.5-2.5) in session 12. DQN stability fix applied (hard target updates, smaller buffer, faster epsilon decay). Previous instability on 20v at 10k → regression at 15k.
-- Type-2 DQN actions (slots 49-56) implemented in session 12. Annulus shows 1 type-2 action at initial state. Domains without proximity pairs (square, etc.) mask all type-2 slots. Annulus DQN training deferred to session 13 (completion unreachable during exploration).
+- Type-2 DQN actions (slots 49-56) implemented in session 12. Annulus shows 1 type-2 action at initial state. Domains without proximity pairs (square, etc.) mask all type-2 slots. Annulus DQN training deferred (completion unreachable during exploration; oracle incomplete at 21v).
+- Type-0 priority vertex selection (session 12) helps concave domains (H-shape: 15Q→11Q) but hurts convex domains (octagon: 0.579→0.349). Made configurable per-domain in session 13 (default OFF, ON for h-shape and l-shape only).
+- Boundary distance filter (3% fan radius, session 12) may be too aggressive for narrow domains — rectangle regressed 0.464→0.426. Needs investigation.
+- Repository reorganized in session 13: `src/` → `madmeshr/`, PascalCase → snake_case filenames. Example images in `tests/output/`.

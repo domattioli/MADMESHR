@@ -26,7 +26,7 @@ dev = [
 madmeshr = "main:main"
 
 [tool.setuptools.packages.find]
-include = ["src*"]
+include = ["madmeshr*"]
 
 [tool.setuptools.package-data]
 "*" = ["domains/*.npy"]

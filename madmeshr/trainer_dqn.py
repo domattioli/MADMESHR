@@ -2,8 +2,8 @@ import os
 import numpy as np
 from typing import Optional
 
-from src.DQN import DQN, MaskedReplayBuffer
-from src.DiscreteActionEnv import DiscreteActionEnv
+from madmeshr.dqn import DQN, MaskedReplayBuffer
+from madmeshr.discrete_action_env import DiscreteActionEnv
 
 __all__ = ['DQNTrainer']
 

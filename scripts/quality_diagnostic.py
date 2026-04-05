@@ -12,8 +12,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-from src.MeshEnvironment import MeshEnvironment
-from src.DiscreteActionEnv import DiscreteActionEnv
+from madmeshr.mesh_environment import MeshEnvironment
+from madmeshr.discrete_action_env import DiscreteActionEnv
 
 
 def quality_for_all_valid_actions(env, discrete_env):
