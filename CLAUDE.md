@@ -37,7 +37,7 @@ python scripts/validate_mesh.py
 python scripts/quality_diagnostic.py
 ```
 
-Available domains: `square`, `octagon`, `circle`, `star`, `l-shape`, `rectangle`, `h-shape` (24v, crossbar y=1.5-2.5), `annulus-layer2`, `annulus-subloop-7v`, `annulus-subloop-9v`
+Available domains: `square`, `octagon`, `circle`, `star`, `l-shape`, `rectangle`, `h-shape` (24v, crossbar y=1.5-2.5), `annulus-layer2`, `annulus-subloop-7v`, `annulus-subloop-9v`, `annulus-subloop-5v`, `annulus-subloop-6v`, `annulus-subloop-5v-a`, `annulus-subloop-5v-b`, `annulus-subloop-7v-b`
 
 ## Architecture
 
@@ -111,3 +111,7 @@ All development sessions must follow the adversarial planning process documented
 - Eval scripts (`scripts/eval_ablation.py`, `scripts/eval_checkpoints.py`) now import domain definitions from main.py to prevent domain definition drift.
 - Annulus sub-loop approach (session 15): oracle type-2 splits create pending loops. 18v loop is degenerate (figure-8, duplicate vertices), split into 6v+9v+4v clean sub-loops. DQN on standalone sub-loops: 7v 100% completion q=0.417 (3Q+1T), 9v 100% completion q=0.368 (6Q+0T). Sub-loop curriculum is viable path to full annulus.
 - Mu density penalty: `n_expected_override` parameter added to DiscreteActionEnv (session 15). Default None = use `len(initial_boundary)/2`. Can override per-domain via domain registry.
+- Annulus DQN assembly (session 16): COMPLETE. Oracle type-2 decomposition (10 elements across 3 levels) + DQN sub-loop evaluation (14/14 sub-loops completed). Final mesh: 40 elements (31Q+9T), q=0.427. Decomposition tree: 64v → oracle splits → figure-8 handling → further type-2 → all pieces ≤7v. Assembly script: `scripts/assemble_annulus.py`.
+- Validity-checked type-2 decomposition (session 16): reject type-2 placements that create self-intersecting boundaries. Essential for multi-level decomposition on complex geometries.
+- 29v active boundary from annulus oracle is itself a figure-8 (duplicate vertex at indices 22,26). Must split before further decomposition.
+- Transformer architecture design notes in `doc/development_notes/transformer_architecture.md` — per-vertex features, cyclic RoPE, multi-vertex action space. Implementation deferred to session 18+.

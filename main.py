@@ -119,6 +119,36 @@ def _make_annulus_subloop_9v():
     return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_subloop_9v.npy"))
 
 
+@register_domain("annulus-subloop-5v", "5-vertex sub-loop from annulus 18v figure-8 split (loop A)", max_ep_len=8)
+def _make_annulus_subloop_5v():
+    import os
+    return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_subloop_5v_fig8.npy"))
+
+
+@register_domain("annulus-subloop-6v", "6-vertex sub-loop from annulus oracle pending loop 4", max_ep_len=10)
+def _make_annulus_subloop_6v():
+    import os
+    return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_subloop_6v.npy"))
+
+
+@register_domain("annulus-subloop-5v-a", "5-vertex sub-loop from 25v type-2 decomposition", max_ep_len=8)
+def _make_annulus_subloop_5v_a():
+    import os
+    return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_25v_sub_0_5v.npy"))
+
+
+@register_domain("annulus-subloop-5v-b", "5-vertex active boundary from 17v type-2 decomposition", max_ep_len=8)
+def _make_annulus_subloop_5v_b():
+    import os
+    return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_17v_active.npy"))
+
+
+@register_domain("annulus-subloop-7v-b", "7-vertex sub-loop from 17v type-2 decomposition", max_ep_len=10)
+def _make_annulus_subloop_7v_b():
+    import os
+    return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_17v_sub_1_7v.npy"))
+
+
 # ---------------------------------------------------------------------------
 # SAC training (legacy)
 # ---------------------------------------------------------------------------
