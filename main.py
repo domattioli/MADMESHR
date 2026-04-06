@@ -27,7 +27,7 @@ from madmeshr.mesh_environment import MeshEnvironment
 DOMAINS = {}
 
 
-def register_domain(name, description, max_ep_len=20, type0_priority=False, bnd_dist_threshold=0.03, type2_threshold=0.02):
+def register_domain(name, description, max_ep_len=20, type0_priority=False, bnd_dist_threshold=0.03, type2_threshold=0.02, n_expected_override=None):
     """Decorator to register a domain factory function."""
     def decorator(fn):
         fn.description = description
@@ -35,6 +35,7 @@ def register_domain(name, description, max_ep_len=20, type0_priority=False, bnd_
         fn.type0_priority = type0_priority
         fn.bnd_dist_threshold = bnd_dist_threshold
         fn.type2_threshold = type2_threshold
+        fn.n_expected_override = n_expected_override
         DOMAINS[name] = fn
         return fn
     return decorator
@@ -104,6 +105,18 @@ def _make_h_shape():
 def _make_annulus_layer2():
     import os
     return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_layer2.npy"))
+
+
+@register_domain("annulus-subloop-7v", "7-vertex sub-loop from annulus type-2 oracle", max_ep_len=10)
+def _make_annulus_subloop_7v():
+    import os
+    return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_subloop_7v.npy"))
+
+
+@register_domain("annulus-subloop-9v", "9-vertex sub-loop from annulus type-2 figure-8 split", max_ep_len=12)
+def _make_annulus_subloop_9v():
+    import os
+    return np.load(os.path.join(os.path.dirname(__file__), "domains", "annulus_subloop_9v.npy"))
 
 
 # ---------------------------------------------------------------------------
@@ -318,8 +331,9 @@ def main():
     type0_prio = getattr(domain_fn, 'type0_priority', False)
     bnd_dist_th = getattr(domain_fn, 'bnd_dist_threshold', 0.03)
     type2_th = getattr(domain_fn, 'type2_threshold', 0.02)
+    n_exp_override = getattr(domain_fn, 'n_expected_override', None)
     env = MeshEnvironment(initial_boundary=boundary, type0_priority=type0_prio, bnd_dist_threshold=bnd_dist_th)
-    print(f"Domain: {args.domain} ({len(boundary)} vertices, type0_priority={type0_prio}, bnd_dist_threshold={bnd_dist_th}, type2_threshold={type2_th})")
+    print(f"Domain: {args.domain} ({len(boundary)} vertices, type0_priority={type0_prio}, bnd_dist_threshold={bnd_dist_th}, type2_threshold={type2_th}, n_expected_override={n_exp_override})")
 
     if args.greedy:
         run_greedy(boundary, args.domain, n_angle=args.n_angle, n_dist=args.n_dist,
@@ -332,7 +346,7 @@ def main():
         from madmeshr.trainer_dqn import DQNTrainer
         from madmeshr.utils.visualization import run_dqn_eval_and_save
 
-        discrete_env = DiscreteActionEnv(env, n_angle=args.n_angle, n_dist=args.n_dist, type2_threshold=type2_th)
+        discrete_env = DiscreteActionEnv(env, n_angle=args.n_angle, n_dist=args.n_dist, type2_threshold=type2_th, n_expected_override=n_exp_override)
         agent = DQN(state_dim=44, num_actions=discrete_env.max_actions,
                     target_update_freq=args.target_update_freq)
 
@@ -345,7 +359,7 @@ def main():
                 agent, boundary, args.domain,
                 n_angle=args.n_angle, n_dist=args.n_dist,
                 type0_priority=type0_prio, bnd_dist_threshold=bnd_dist_th,
-                type2_threshold=type2_th)
+                type2_threshold=type2_th, n_expected_override=n_exp_override)
             print(f"Eval: return={stats['return']:.2f} | "
                   f"quality={stats['mean_quality']:.3f} | "
                   f"elements={stats['n_elements']} ({stats['n_quads']}Q+{stats['n_triangles']}T) | "
@@ -371,7 +385,8 @@ def main():
         stats = run_dqn_eval_and_save(
             agent, boundary, args.domain,
             n_angle=args.n_angle, n_dist=args.n_dist,
-            type0_priority=type0_prio, bnd_dist_threshold=bnd_dist_th)
+            type0_priority=type0_prio, bnd_dist_threshold=bnd_dist_th,
+            type2_threshold=type2_th, n_expected_override=n_exp_override)
         print(f"\nFinal eval: return={stats['return']:.2f} | "
               f"quality={stats['mean_quality']:.3f} | "
               f"elements={stats['n_elements']} ({stats['n_quads']}Q+{stats['n_triangles']}T) | "

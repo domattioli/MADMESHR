@@ -37,7 +37,7 @@ python scripts/validate_mesh.py
 python scripts/quality_diagnostic.py
 ```
 
-Available domains: `square`, `octagon`, `circle`, `star`, `l-shape`, `rectangle`, `h-shape` (24v, crossbar y=1.5-2.5), `annulus-layer2`
+Available domains: `square`, `octagon`, `circle`, `star`, `l-shape`, `rectangle`, `h-shape` (24v, crossbar y=1.5-2.5), `annulus-layer2`, `annulus-subloop-7v`, `annulus-subloop-9v`
 
 ## Architecture
 
@@ -109,3 +109,5 @@ All development sessions must follow the adversarial planning process documented
 - Type-2 proximity threshold now configurable via `type2_threshold` in DiscreteActionEnv (default 0.02). Annulus set to 0.10 (5 valid type-2 at init vs 1 at 0.02).
 - Annulus DQN training (session 14): 0% completion at 4k steps. Agent places 2-3 elements per episode. Bottleneck: single-ref-vertex selection wastes most steps; boundary growth guard too strict. Needs sub-loop curriculum with multi-vertex selection.
 - Eval scripts (`scripts/eval_ablation.py`, `scripts/eval_checkpoints.py`) now import domain definitions from main.py to prevent domain definition drift.
+- Annulus sub-loop approach (session 15): oracle type-2 splits create pending loops. 18v loop is degenerate (figure-8, duplicate vertices), split into 6v+9v+4v clean sub-loops. DQN on standalone sub-loops: 7v 100% completion q=0.417 (3Q+1T), 9v 100% completion q=0.368 (6Q+0T). Sub-loop curriculum is viable path to full annulus.
+- Mu density penalty: `n_expected_override` parameter added to DiscreteActionEnv (session 15). Default None = use `len(initial_boundary)/2`. Can override per-domain via domain registry.

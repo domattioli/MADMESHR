@@ -21,11 +21,13 @@ class DiscreteActionEnv(gym.Wrapper):
     K_TYPE2 = 8  # max type-2 action slots
 
     def __init__(self, env: MeshEnvironment, n_angle: int = 12, n_dist: int = 4,
-                 no_valid_penalty: float = -2.0, type2_threshold: float = 0.02):
+                 no_valid_penalty: float = -2.0, type2_threshold: float = 0.02,
+                 n_expected_override: int = None):
         super().__init__(env)
         self.n_angle = n_angle
         self.n_dist = n_dist
         self.type2_threshold = type2_threshold
+        self.n_expected_override = n_expected_override
         self._type01_actions = 1 + n_angle * n_dist  # 49
         self.max_actions = self._type01_actions + self.K_TYPE2  # 57
         self.no_valid_penalty = no_valid_penalty
@@ -217,7 +219,7 @@ class DiscreteActionEnv(gym.Wrapper):
                 # Type-0/1 reward: eta_e + 0.3*eta_b + mu
                 # Scale density thresholds by expected element count
                 element_area = self.env._calculate_polygon_area(new_element)
-                n_expected = max(1, len(self.env.initial_boundary) / 2)
+                n_expected = self.n_expected_override if self.n_expected_override is not None else max(1, len(self.env.initial_boundary) / 2)
                 ideal_area = self.env.original_area / n_expected
                 A_min = 0.1 * ideal_area
                 A_max = 0.5 * ideal_area
