@@ -1,7 +1,7 @@
 # Session 16 Plan: Annulus Full Pipeline + Quality Push (12-Hour Extended Session)
 
 **Date:** 2026-04-07
-**Status:** Final (self-reviewed, adversarial agents explored codebase)
+**Status:** Final (adversarial-reviewed, v3)
 **Budget:** 12 hours
 
 ## Context
@@ -21,6 +21,24 @@ The oracle with type2_threshold=0.10 creates 5 pending loops (7v, 3v, 18v*, 3v, 
 - RTX 3060: sequential training only (OOM if parallel)
 - ~400ms/step → 7500 steps = 50 min, 15k steps = 100 min
 - **Training budget: ~10-12 runs max in 12 hours** (with code/eval overhead)
+
+## Adversarial Review Summary
+
+**Devil's Advocate #1** attacked:
+1. State representation is blind to existing elements (44-float state has no spatial info about placed elements) → **Accepted but moot**: we use standalone sub-loop training, not SubLoopEnv with existing elements. Assembly is geometric, not RL.
+2. 29v boundary is intractable: 9v→29v is 3x boundary size, ~12x training needed (~90k steps) → **Accepted**: Option A (further splitting) is strongly preferred. Budget only 2 training runs for 29v direct, abort if no progress.
+3. Quality 0.368 is 18% below greedy (0.450), borderline unacceptable → **Partially accepted**: quality ceiling investigation added to WS4. But note DQN uses 6 elements vs greedy's 13 — DQN is more efficient.
+4. Figure-8 degenerate loops will recur on further type-2 splits → **Accepted**: added systematic figure-8 detection + splitting to WS2 as mandatory step.
+5. Transfer gap: standalone training won't transfer to with-existing-elements → **Accepted**: defer SubLoopEnv to session 17. Assembly in session 16 uses standalone DQN per sub-loop + geometric combination.
+
+**Scope Realist** computed:
+1. GPU budget: 600 min usable → 8 runs max at 75 min, 6 runs at 100 min → **Accepted**: reduced training runs, cut Phase 4 quality optimization unless ahead of schedule.
+2. SubLoopEnv is unnecessary — standalone domain training already proven → **Accepted**: removed SubLoopEnv from plan entirely. Phase 1 simplified to register+train remaining sub-loops.
+3. 29v completion at 15k steps is uncertain (largest proven = 9v). Budget 200 min worst case. → **Accepted**: hard kill at step 5000 if <50% completion.
+4. Phase 3 (assembly) should be "design only" if Phase 2 fails → **Accepted**: assembly is contingent on ≥80% sub-loop coverage.
+5. Phase 4 should be cut entirely — premature before pipeline works → **Accepted**: moved to "contingent" status.
+
+**Bottom line:** Session 16 is about (a) training ALL remaining sub-loops as standalone domains, (b) attempting to split and complete the 29v active boundary, and (c) building the geometric assembly pipeline. SubLoopEnv is deferred to session 17. Quality optimization is contingent on pipeline completion.
 
 ## Strategy
 
