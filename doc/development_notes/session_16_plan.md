@@ -1,331 +1,172 @@
-# Session 16 Plan: Annulus Full Pipeline + Quality Push (12-Hour Extended Session)
+# Session 16 Plan: Complete Annulus Mesh (12-Hour Extended Session)
 
 **Date:** 2026-04-07
-**Status:** Final (adversarial-reviewed, v3)
+**Status:** Final (4-agent adversarial review)
 **Budget:** 12 hours
+
+## Goal
+
+**Produce a complete, validated quad mesh of annulus-layer2. Every vertex consumed, no gaps.**
+
+Quality is secondary to completion. A mesh with some triangles is acceptable in Phase 1. Quality improvement happens in Phase 2 once completion is proven.
 
 ## Context
 
-Session 15 confirmed DQN can complete annulus sub-loops:
-- 7v sub-loop: 100% completion, q=0.417, 3Q+1T, trained in 50 min
-- 9v sub-loop: 100% completion, q=0.368, 6Q+0T, trained in 50 min
-- Greedy baselines: 7v q=0.460 (4Q+1T), 9v q=0.450 (13Q+1T)
+Session 15 proved DQN completes sub-loops (7v: q=0.417, 9v: q=0.368). But four independent review agents converged on a surprise: **DQN is not the path to completing the full annulus.** The oracle (greedy script) with a relaxed boundary growth guard and triangle fallback is faster and more reliable. DQN is a quality optimizer for already-solvable domains, not a completion tool.
 
-The oracle with type2_threshold=0.10 creates 5 pending loops (7v, 3v, 18v*, 3v, 6v) + 29v active boundary. The 18v loop is a figure-8 (degenerate), splitting into 6v+9v+4v clean sub-loops.
+Key facts:
+- Oracle gets the 29v active boundary down to ~5v before stalling (growth guard blocks remaining actions)
+- Greedy beats DQN on quality for every tested sub-loop (0.460 vs 0.417 on 7v, 0.450 vs 0.368 on 9v)
+- The 18v pending loop is a figure-8 (degenerate) — already handled by session 15 splitting code
+- DQN checkpoints exist for 7v and 9v sub-loops — free to use in assembly, no training needed
+- Training runs take 50-100 min each on the GPU — expensive for uncertain payoff
 
-**Key insight from session 15:** DQN trained on standalone sub-loops produces 100% completion with reasonable quality. The DQN is much more efficient than greedy (9v: 6 elements vs 13).
+## Phase 1: Get a Complete Mesh (Hours 0-3)
 
-**Architecture constraints:**
-- Single-ref-vertex selection per step (no multi-vertex yet)
-- 44-float enriched state is local to one vertex
-- RTX 3060: sequential training only (OOM if parallel)
-- ~400ms/step → 7500 steps = 50 min, 15k steps = 100 min
-- **Training budget: ~10-12 runs max in 12 hours** (with code/eval overhead)
+**Objective:** A complete annulus mesh by any means. Triangles allowed. Quality floor: none.
 
-## Adversarial Review Summary
+### Hour 0-1: Build the oracle-assembler
 
-**Devil's Advocate #1** attacked:
-1. State representation is blind to existing elements (44-float state has no spatial info about placed elements) → **Accepted but moot**: we use standalone sub-loop training, not SubLoopEnv with existing elements. Assembly is geometric, not RL.
-2. 29v boundary is intractable: 9v→29v is 3x boundary size, ~12x training needed (~90k steps) → **Accepted**: Option A (further splitting) is strongly preferred. Budget only 2 training runs for 29v direct, abort if no progress.
-3. Quality 0.368 is 18% below greedy (0.450), borderline unacceptable → **Partially accepted**: quality ceiling investigation added to WS4. But note DQN uses 6 elements vs greedy's 13 — DQN is more efficient.
-4. Figure-8 degenerate loops will recur on further type-2 splits → **Accepted**: added systematic figure-8 detection + splitting to WS2 as mandatory step.
-5. Transfer gap: standalone training won't transfer to with-existing-elements → **Accepted**: defer SubLoopEnv to session 17. Assembly in session 16 uses standalone DQN per sub-loop + geometric combination.
+Write `scripts/assemble_annulus.py` that operates directly on `MeshEnvironment` internals:
 
-**Scope Realist** computed:
-1. GPU budget: 600 min usable → 8 runs max at 75 min, 6 runs at 100 min → **Accepted**: reduced training runs, cut Phase 4 quality optimization unless ahead of schedule.
-2. SubLoopEnv is unnecessary — standalone domain training already proven → **Accepted**: removed SubLoopEnv from plan entirely. Phase 1 simplified to register+train remaining sub-loops.
-3. 29v completion at 15k steps is uncertain (largest proven = 9v). Budget 200 min worst case. → **Accepted**: hard kill at step 5000 if <50% completion.
-4. Phase 3 (assembly) should be "design only" if Phase 2 fails → **Accepted**: assembly is contingent on ≥80% sub-loop coverage.
-5. Phase 4 should be cut entirely — premature before pipeline works → **Accepted**: moved to "contingent" status.
+1. Load annulus-layer2 boundary
+2. Run type-2 pass (threshold=0.10) to place type-2 elements and create sub-loops
+3. For each pending sub-loop:
+   - 3v → single triangle (hardcoded)
+   - 4v → single quad (hardcoded)
+   - Figure-8 loops → split at duplicate vertices, recurse on each piece
+   - 6v-9v → use existing DQN checkpoint if available, else greedy
+4. For the active boundary (29v): run greedy with **relaxed growth guard**
+   - Change: allow boundary to grow by +1 (type-1 placements that add an interior vertex)
+   - This unblocks the 5v stall the current oracle hits
+5. Triangle fallback: if stuck at 5v, place a triangle (→4v), then a quad (→0v). If stuck at any N≤6, use triangle fan.
+6. Combine all elements, save visualization, run 7-point validation
 
-**Bottom line:** Session 16 is about (a) training ALL remaining sub-loops as standalone domains, (b) attempting to split and complete the 29v active boundary, and (c) building the geometric assembly pipeline. SubLoopEnv is deferred to session 17. Quality optimization is contingent on pipeline completion.
+**The key code change** is in the assembler's growth guard: `len(boundary) > len(saved) + 1` instead of `len(boundary) > len(saved)`. This alone should unblock the stall.
 
-## Strategy
+### Hour 1-2: Debug and iterate
 
-The session has three tiers:
+Run the assembler. It will probably stall somewhere unexpected. Fix it. Likely issues:
+- Intersection checks rejecting valid placements near type-2 split boundaries
+- Floating-point vertex matching between sub-loops
+- CW winding on some sub-loops (reverse before meshing)
 
-**Tier 1 (MUST DO, ~5 hours):** Complete the annulus sub-loop pipeline. Train DQN on ALL clean sub-loops from the oracle. Build the assembly script that combines type-2 elements + DQN sub-loop meshes into a complete annulus mesh.
+### Hour 2-3: First complete mesh or clear diagnosis
 
-**Tier 2 (SHOULD DO, ~4 hours):** Handle the 29v active boundary. This requires either (a) further type-2 splitting to create manageable sub-loops, or (b) training DQN directly on 29v, or (c) a hybrid greedy+DQN approach.
+**Decision gate at hour 3:**
+- Complete mesh achieved → move to Phase 2 (quality improvement)
+- Stalled at a specific boundary (e.g., 12v irregular shape) → register as standalone domain, try greedy with different parameters, then DQN as last resort
+- Fundamentally broken (assembly logic wrong) → spend hour 3-4 fixing, push Phase 2 to hour 4
+
+### During GPU idle time (if any training runs needed)
+
+Pre-queued tasks, in order:
+1. Write assembly validation tests
+2. Register next domain / prepare next training command
+3. **Implement a Pan et al. benchmark domain** — pick one from the paper, define the boundary, register it, run greedy baseline. This has been deferred for 15 sessions; idle time is free time to finally do it.
+4. **Sketch a transformer architecture** for MADMESHR — write a design doc exploring what a transformer-based policy would look like (attention over boundary vertices, replacing the 44-float local state with a sequence model that sees the full boundary). No code, just architecture notes in `doc/development_notes/transformer_architecture.md`.
+5. Incremental documentation
 
-**Tier 3 (NICE TO HAVE, ~3 hours):** Quality optimization, longer training runs, octagon/rectangle quality push, documentation.
+Never poll training status. Use `run_in_background` and wait for notification.
 
-## Workstreams (Strict Priority Order)
+## Phase 2: Improve the Mesh (Hours 3-8)
 
----
+**Objective:** Replace triangles with quads. Improve quality. Make it publishable.
 
-### WS1: Complete Sub-Loop Coverage (Priority 1, ~90 min)
+**Only enter Phase 2 if Phase 1 produced a complete mesh.**
 
-**Problem:** The oracle creates multiple sub-loops of different sizes. We've trained on 7v and 9v. The remaining clean sub-loops are: 6v (from pending loop 0 figure-8 split), 4v (from 18v split), 6v (pending loop 4, CW winding), and the two 3v loops. We need DQN models for each, or verify greedy handles the small ones.
+### Step 1: Measure the baseline (30 min)
+- Count: how many triangles? What's the mean quality? Where are the worst elements?
+- Visualize: save annotated image showing element quality heatmap
+- This tells us where to focus
 
-**Step 1: Audit all sub-loops (15 min)**
-- Re-run oracle extraction, catalog ALL sub-loops with:
-  - Vertex count, area, edge lengths, winding direction
-  - Whether greedy can complete them (3v and 4v should be trivial)
-  - Whether they need CW→CCW reversal
-- Decision: which sub-loops need DQN training vs greedy-only?
-  - 3v loops: trivial (single triangle), no training needed
-  - 4v loops: single quad, no training needed
-  - 6v loops: register as domains, run greedy baseline
-  - Already trained: 7v, 9v
+### Step 2: Replace greedy sub-meshes with DQN (2 hours)
+- For each sub-loop currently meshed by greedy, swap in the DQN checkpoint mesh
+- We already have DQN checkpoints for 7v (q=0.417) and 9v (q=0.368)
+- Compare quality: is the DQN mesh actually better or worse per sub-loop?
+- For sub-loops without DQN checkpoints: train if the sub-loop has ≥6v and greedy quality <0.35 (otherwise not worth it)
 
-**Step 2: Register and baseline remaining domains (15 min)**
-- Register 6v sub-loops in main.py
-- Fix CW winding to CCW where needed (reverse vertex order)
-- Run greedy baselines on all new domains
-- Run 7-point validation
+### Step 3: Attack the 29v boundary quality (2 hours)
+- If Phase 1 used triangle fallback on the 29v boundary, try to reduce triangle count:
+  - Backtracking search: if greedy stalls at Nv, undo 2-3 steps, try different action sequence
+  - DFS with depth limit (computationally trivial for ≤10v remaining boundary)
+- If Phase 1 split the 29v into sub-loops, train DQN on the largest one
+- **Hard time limit: 2 hours.** If no improvement, keep Phase 1 result.
 
-**Step 3: Train DQN on 6v sub-loops (60 min, 2 sequential runs)**
-- Config: 12x4, 5000 steps (smaller domain = faster convergence), eps-decay 0.5, buffer 15k, target update 400
-- Kill at t=2500 if 0% completion
-- These should be easy given 7v and 9v success
+### Step 4: Reassemble with improvements (30 min)
+- Rebuild the mesh using best-available sub-mesh for each region
+- Run 7-point validation on final assembly
+- Save to tests/output/
 
-**Decision gate:** If ANY sub-loop fails greedy and DQN, that sub-loop needs investigation (geometry too irregular, or needs n_expected_override).
+**Decision gate at hour 8:**
+- Quality ≥ 0.35 mean, ≤ 20% triangles → move to Phase 3
+- Quality < 0.35 or > 20% triangles → continue Phase 2 improvements until hour 10, skip Phase 3
 
-**Files:** `scripts/extract_subloop.py`, `main.py`, `domains/annulus_subloop_*.npy`
+## Phase 3: Harden and Extend (Hours 8-11)
 
----
+**Only enter Phase 3 if Phase 2 achieved acceptable quality.**
 
-### WS2: Active Boundary Strategy (Priority 2, ~120 min)
+### Option A: Pan et al. benchmark domains (if mesh quality is good)
+- This has been deferred for 15 sessions. With a working pipeline, now is the time.
+- Implement 2-3 Pan et al. benchmark domains
+- Run greedy + DQN on each
+- Record quality comparison
 
-**Problem:** After type-2 placements, the oracle leaves a 29v active boundary (area=0.357, 1 duplicate vertex). This is the largest remaining piece. Options:
+### Option B: Pipeline hardening (if mesh needs more work)
+- Make `assemble_annulus.py` a proper reusable tool (CLI args, configurable thresholds)
+- Add tests for assembly logic
+- Try the pipeline on a different multi-loop domain if one is available
 
-**Option A: Further type-2 splitting (preferred)**
-- Run oracle on just the 29v active boundary with type2_threshold=0.10
-- If it creates manageable sub-loops (≤12v), train DQN on those
-- This is the recursive application of the sub-loop strategy
+### Option C: Quality push on existing domains (if everything else is done)
+- Octagon: train 15k steps, try to close the 0.579→0.61 ceiling gap
+- 9v sub-loop: train 15k steps, see if quality passes greedy (0.368→0.45?)
 
-**Option B: Direct DQN on 29v**
-- Register 29v as standalone domain (clean the duplicate vertex first)
-- max_ep_len=35, n_expected_override=14
-- Train with 15000 steps (~100 min)
-- High risk: session 14 showed 64v doesn't work, but 29v is much smaller
+**Pick whichever option has the most project value at hour 8.** Don't pre-commit.
 
-**Option C: Hybrid greedy+DQN**
-- Use greedy to place first ~5 elements on easy vertices
-- Then hand off to DQN for the remaining ~20v boundary
-- Requires new infrastructure (partial initialization)
+## Phase 4: Documentation (Hours 11-12, MANDATORY)
 
-**Step 1: Try Option A first (30 min)**
-- Extract 29v boundary, clean duplicate vertex
-- Initialize MeshEnvironment with 29v as initial_boundary
-- Run oracle-style type-2 scan: how many valid type-2 pairs at threshold=0.10?
-- If ≥2 valid type-2: extract new sub-loops, register as domains
-- If 0 valid type-2: fall through to Option B
+Regardless of what happened:
+1. Write `session_16_report.md` with all results, metrics, decisions
+2. Run 7-point validation on all domains (existing + new)
+3. Push mesh images to `tests/output/`
+4. Create `session_17_plan.md` with adversarial methodology
+5. Commit and push everything
 
-**Step 2: Execute based on Option A result (90 min)**
-- If Option A succeeds: train DQN on resulting sub-loops (2-3 runs @ 50 min each, overlap with evaluation)
-- If Option A fails: try Option B (direct 29v training, 100 min, high risk)
-  - Kill at t=5000 if 0% completion
-  - If 0% at kill: accept that 29v needs multi-vertex selection (session 17 scope)
+## What "Done" Looks Like
 
-**Decision gate:** The 29v boundary completion is the session's biggest risk. If neither Option A nor B work, the annulus pipeline will be incomplete — we'll have a mesh with a 29v hole.
+| Milestone | Definition | Acceptable? |
+|-----------|-----------|-------------|
+| Phase 1 complete | All 64 boundary vertices consumed, no gaps in mesh | Triangles OK, any quality |
+| Phase 2 complete | ≤20% triangles, mean quality ≥0.35 | Publishable-quality mesh |
+| Phase 3 complete | Pipeline reusable OR Pan et al. comparison started | Stretch goal |
 
-**Files:** `scripts/extract_subloop.py`, `main.py`
+## Constraints
 
----
+- Never run parallel TF training (OOM on RTX 3060)
+- Run `pytest tests/ -v` after any code changes (must maintain 44+ tests)
+- Always validate mesh output with `python scripts/validate_mesh.py`
+- Do not spend >2 hours on any single debugging issue — move on, use fallback
+- Do not implement multi-vertex selection (architecture redesign, session 17+)
+- Do not commit reports until results are in
 
-### WS3: Assembly Pipeline (Priority 3, ~90 min)
+## Risk Table
 
-**Problem:** Need a script that combines oracle type-2 elements + DQN sub-loop meshes into a complete annulus mesh.
+| Risk | Plan |
+|------|------|
+| Oracle-assembler stalls on 29v at 5v | Relax growth guard (+1), triangle fallback at ≤6v |
+| Relaxed guard causes element intersections | Keep intersection checks, only relax growth guard |
+| Figure-8 sub-loops from further type-2 splits | Split at duplicate vertices (session 15 code), recurse |
+| Assembly has gaps at sub-loop boundaries | Vertex-matching with tolerance 1e-8, shared edges |
+| Phase 1 takes >3 hours | Skip Phase 3, extend Phase 1-2 to hour 10 |
+| DQN quality worse than greedy on sub-loops | Use greedy, DQN is optional quality experiment |
+| Behind schedule at hour 8 | Keep Phase 1 mesh as-is, go directly to Phase 4 |
 
-**Step 1: Build assembler (45 min)**
-- Script: `scripts/assemble_annulus.py`
-- Input: annulus-layer2 boundary
-- Process:
-  1. Run oracle type-2 pass → get type-2 elements + pending loops + active boundary
-  2. For each pending loop: load best DQN checkpoint, run deterministic eval, collect elements
-  3. For active boundary: run DQN or greedy (depending on WS2 outcome)
-  4. Combine all elements
-  5. Compute overall quality metrics
-  6. Save visualization
+## What the Agents Said
 
-**Step 2: End-to-end test (30 min)**
-- Run assembler on annulus-layer2
-- Validate assembled mesh (no overlapping elements, no gaps, all sub-regions covered)
-- Compute coverage: what fraction of the annulus area is meshed?
-- Save result to tests/output/
+**Cost Guardian:** Greedy-first is cheapest path. 29v is the token sinkhole — use greedy fallback, don't iterate. Write assembly code during GPU idle time.
 
-**Step 3: Handle gaps (15 min)**
-- If assembly has gaps (unmeshed sub-loops): use greedy fallback for those
-- If elements overlap: debug the sub-loop boundary extraction
+**Goal Maximizer:** Build oracle-assembler with relaxed growth guard + triangle fallback. 2-4 hours to complete mesh. Skip all DQN training for completion.
 
-**Decision gate:** If the assembled mesh covers ≥80% of the annulus with quality ≥0.3, this is a major milestone. If coverage <50%, the pipeline needs fundamental rework.
+**Big Picture:** The real deliverable is the pipeline proof, not just the mesh. DQN element efficiency (6Q vs 13Q) is a paper result. After annulus: quality parity with greedy, then Pan et al. benchmarks.
 
-**Files:** `scripts/assemble_annulus.py`, `tests/output/annulus_assembled.png`
-
----
-
-### WS4: Quality Optimization (Priority 4, ~90 min)
-
-**Contingent on WS1-3 going well. Skip if behind schedule.**
-
-**Step 1: Longer training on promising sub-loops (60 min)**
-- 9v sub-loop: train 15000 steps (vs 7500 in session 15)
-- 7v sub-loop: train 15000 steps
-- Compare quality improvement: does 2x steps give meaningful quality gain?
-
-**Step 2: Resolution experiment (30 min)**
-- Try 24x4 (97 actions) on 9v sub-loop: 7500 steps
-- Compare quality vs 12x4
-- Decision: is higher resolution worth the slower training?
-
-**Files:** `checkpoints/`, `main.py`
-
----
-
-### WS5: Existing Domain Quality Push (Priority 5, ~60 min)
-
-**Contingent on WS1-4 complete and time remaining.**
-
-**Step 1: Octagon longer training (50 min)**
-- Current best: q=0.579 (5Q, session 8), ceiling ~0.61
-- Train 15000 steps from scratch with current hyperparams
-- Is there a quality gap to close?
-
-**Step 2: H-shape stability check (10 min)**
-- H-shape 24v had instability issues in sessions 12-13
-- Run eval on best checkpoint, verify quality
-
----
-
-### WS6: Documentation + Session 17 Plan (Priority 6, ~60 min, ALWAYS DO)
-
-**Step 1: Write session 16 report (30 min)**
-- Results, metrics, failures for all workstreams
-- Key decisions and their outcomes
-- Updated metrics table
-
-**Step 2: Create session 17 plan (30 min)**
-- Use adversarial methodology
-- Focus on: multi-vertex selection, gymnasium migration, Pan et al. benchmarks
-
----
-
-## Execution Timeline (12 hours)
-
-```
-Hour 0-1.5:  WS1 — Audit sub-loops, register domains, train 6v (Run 1)
-Hour 1.5-2:  WS1 — Train 6v (Run 2, if needed)
-             WS2 Step 1 in parallel with eval
-Hour 2-3.5:  WS2 — Active boundary strategy (Option A attempt)
-Hour 3.5-5:  WS2 — Train on active boundary sub-loops OR Option B
-Hour 5-6.5:  WS3 — Build assembly pipeline + end-to-end test
-Hour 6.5-7:  CHECKPOINT — Evaluate progress, commit what works
-Hour 7-8:    WS4 — Longer training on 9v (if WS1-3 done)
-Hour 8-9:    WS4 — Resolution experiment on 9v
-Hour 9-10:   WS5 — Octagon quality push (if time permits)
-Hour 10-11:  WS5 — Additional optimization OR WS3 gap-filling
-Hour 11-12:  WS6 — Report + session 17 plan (ALWAYS)
-```
-
-**Checkpoint at hour 7:** If WS1-3 are not complete by hour 7, skip WS4-5 and focus on completing the pipeline. WS6 (documentation) is mandatory regardless.
-
-## Training Run Budget
-
-At ~50-100 min per run (sequential only):
-
-| Run | Domain | Steps | Est. Time | Priority |
-|-----|--------|-------|-----------|----------|
-| 1 | 6v sub-loop A | 5000 | 35 min | WS1 |
-| 2 | 6v sub-loop B (if needed) | 5000 | 35 min | WS1 |
-| 3 | Active boundary sub-loop 1 | 7500 | 50 min | WS2 |
-| 4 | Active boundary sub-loop 2 | 7500 | 50 min | WS2 |
-| 5 | Active boundary 29v direct (if needed) | 15000 | 100 min | WS2-B |
-| 6 | 9v longer training | 15000 | 100 min | WS4 |
-| 7 | 7v longer training | 15000 | 100 min | WS4 |
-| 8 | 9v 24x4 resolution | 7500 | 50 min | WS4 |
-| 9 | Octagon | 15000 | 100 min | WS5 |
-
-**Total: 9 possible runs, ~620 min of GPU time = 10.3 hours.** This fits in 12 hours with code/eval overhead. Runs 5-9 are contingent and may be skipped.
-
-## Backup Plans
-
-### Backup A: Active boundary unsplittable (Option A fails)
-If the 29v active boundary has 0 valid type-2 pairs:
-1. Try threshold=0.15 (more permissive)
-2. Try threshold=0.20
-3. If still none: accept partial pipeline (sub-loops only, 29v remains unmeshed)
-4. Session 17 builds multi-vertex selection for large boundaries
-
-### Backup B: Direct 29v DQN fails (Option B fails)
-If DQN can't complete 29v even with 15000 steps:
-1. Use greedy on 29v (will likely produce poor quality but may complete)
-2. Combine greedy mesh with DQN sub-loop meshes
-3. Report quality difference between greedy-29v and DQN-sub-loops
-
-### Backup C: Sub-loop DQN quality too low (<0.25)
-If trained sub-loop quality is unacceptably low:
-1. Increase n_angle to 24 (more action resolution)
-2. Train for 15000 steps instead of 7500
-3. Use n_expected_override to tune mu penalty
-4. If still low: accept as geometry-limited ceiling
-
-### Backup D: Assembly has gaps/overlaps
-If the assembled mesh has geometric errors:
-1. Debug boundary vertex matching between sub-loops (floating-point tolerance)
-2. Check for shared edges between adjacent sub-loops
-3. Fall back to greedy for problematic sub-loops
-
-### Backup E: Behind schedule at hour 7
-If WS1-3 not complete by hour 7:
-1. Skip WS4 (quality optimization) entirely
-2. Skip WS5 (other domains) entirely
-3. Focus remaining 5 hours on completing WS1-3
-4. WS6 (documentation) is mandatory
-
-## Game Theory: What Might Happen
-
-### Optimistic Path (30% probability)
-- All sub-loops train quickly (hour 0-2)
-- Active boundary splits cleanly into 2-3 sub-loops (hour 2-3)
-- Assembly works first try (hour 5-6)
-- Spend hours 7-12 on quality optimization + other domains
-- **Outcome:** Complete annulus mesh, quality push on octagon, session 17 focuses on Pan et al.
-
-### Expected Path (50% probability)
-- Sub-loop training goes smoothly (hour 0-2)
-- Active boundary needs multiple attempts (hour 2-5)
-- Assembly has minor issues to debug (hour 5-7)
-- Limited time for quality optimization (1-2 runs)
-- **Outcome:** Mostly-complete annulus mesh (maybe 29v gap), modest quality improvement
-
-### Pessimistic Path (20% probability)
-- 6v sub-loops have unexpected issues (geometry, winding)
-- Active boundary has 0 valid type-2 pairs AND direct DQN fails
-- Assembly reveals fundamental boundary-matching bugs
-- Spend entire session debugging infrastructure
-- **Outcome:** Verified sub-loops work (session 15 confirmed), but full pipeline incomplete. Session 17 builds multi-vertex selection.
-
-## What NOT to Do
-
-- **Do not implement multi-vertex selection.** Architecture redesign, session 17+ scope.
-- **Do not train on full 64v annulus.** Session 14 proved this doesn't work.
-- **Do not run parallel TF training.** OOM on RTX 3060.
-- **Do not build SubLoopEnv with existing_elements tracking.** If standalone sub-loops work (they do), assembly can be done geometrically without the env tracking existing elements.
-- **Do not commit reports/plans until training results are in.**
-- **Do not spend >2 hours on any single debugging issue.** If stuck, move to the next priority.
-
-## Success Criteria
-
-| Metric | Session 15 | Target | Stretch |
-|--------|-----------|--------|---------|
-| Sub-loops completed | 2 (7v, 9v) | **All clean sub-loops** | All + 29v |
-| Annulus coverage | 0% (no assembly) | **≥50% area meshed** | 100% |
-| Annulus quality | N/A | **≥0.30 mean** | ≥0.40 |
-| Assembly pipeline | N/A | **Working script** | End-to-end automated |
-| 9v quality (longer training) | 0.368 | **≥0.40** | ≥0.45 |
-| No regressions | 10/10 validation | **10/10+** | All new domains pass |
-| Tests | 44 | **44+** | New assembly tests |
-
-## Risk / Mitigation Table
-
-| Risk | Likelihood | Impact | Mitigation |
-|------|-----------|--------|------------|
-| 29v active boundary too hard for DQN | High | High | Option A (further split) first; accept gap if both options fail |
-| 6v sub-loops have CW winding issues | Medium | Low | Reverse vertex order before registering |
-| Assembly boundary mismatch (float precision) | Medium | Medium | Use vertex-matching with tolerance 1e-8 |
-| Training runs exceed time budget | Medium | Medium | Hard checkpoint at hour 7; skip WS4-5 |
-| Sub-loop quality ceiling too low | Low | Medium | Accept as geometry-limited; higher resolution is WS4 |
-| Code changes break existing domains | Low | High | All new params have defaults; run full test suite after each change |
-| Duplicate vertices in active boundary | Known | Medium | Clean before registering as domain |
+**Methods Optimizer:** No type2_threshold completes the oracle. Greedy beats DQN on quality everywhere. Implement backtracking search for stuck boundaries. Skip DQN for this session entirely.
